@@ -2,6 +2,40 @@ import { requestV2 } from './client.js';
 import { wrapForV2, fields, searchByCustomField } from './customFields.js';
 import { logger } from '../utils/logger.js';
 
+// Name + org fallback lookup. Barbour often ships persons with only a name and
+// no email. Searching PD by name alone is too ambiguous (many people share names),
+// but "same name at the same organization" is a strong dedup signal since we've
+// already resolved the org one step earlier. Adopt only on exactly 1 match.
+async function findPersonByNameAndOrg(name, orgId) {
+  if (!name || !orgId) return null;
+  const res = await requestV2(
+    {
+      method: 'GET',
+      url: '/persons/search',
+      params: { term: name, exact_match: true, limit: 20 },
+    },
+    { label: 'pd-personSearchByName' },
+  );
+  const items = res.data?.data?.items || [];
+  const target = name.toLowerCase();
+  const strict = items
+    .map((wrap) => wrap?.item || wrap)
+    .filter((p) => {
+      if (!p) return false;
+      if ((p.name || '').toLowerCase() !== target) return false;
+      const pOrgId = p.organization?.id ?? p.organization;
+      return pOrgId === orgId;
+    });
+  if (strict.length === 0) return null;
+  if (strict.length > 1) {
+    logger.warn(
+      `[pd-person] "${name}" @ org ${orgId} matches ${strict.length} PD persons (ids: ${strict.map((p) => p.id).join(', ')}) — refusing to auto-adopt, will create new.`,
+    );
+    return null;
+  }
+  return strict[0];
+}
+
 // Exact-email fallback lookup. Used when Barbour-ID lookup misses so we can adopt
 // existing persons the client's team created manually before this integration.
 // Returns exactly 1 match or null — refuse to guess on 0 or 2+ matches.
@@ -90,7 +124,11 @@ export async function updatePerson(personId, person, orgId) {
 }
 
 export async function upsertPerson(person, orgId) {
-  if (!person?.person_id && !person?.email) return null;
+  if (!person) return null;
+  const hasName = !!(person.first_name || person.last_name);
+  // Nothing to key on — skip. Would just create a nameless "Unknown" row.
+  if (!person.person_id && !person.email && !hasName) return null;
+
   // 1. Fast path: dedup by Barbour person ID.
   if (person.person_id) {
     const existing = await findPersonByBarbourId(person.person_id);
@@ -99,8 +137,7 @@ export async function upsertPerson(person, orgId) {
       return updatePerson(existing.id, person, orgId);
     }
   }
-  // 2. Legacy path: exact-email match against persons the client's team created
-  //    manually. Adopting writes our Barbour person ID onto them.
+  // 2. Email match — adopts persons the client's team created manually.
   if (person.email) {
     const byEmail = await findPersonByExactEmail(person.email);
     if (byEmail?.id) {
@@ -108,6 +145,19 @@ export async function upsertPerson(person, orgId) {
         `[pd-person] adopting existing person ${byEmail.id} for "${person.email}" by email match`,
       );
       return updatePerson(byEmail.id, person, orgId);
+    }
+  }
+  // 3. Name + org match — covers Barbour persons that arrive without an email
+  //    (very common). Only tried when the org has already been resolved so the
+  //    name check is scoped, avoiding false matches across unrelated companies.
+  if (hasName && orgId) {
+    const name = fullName(person);
+    const byNameOrg = await findPersonByNameAndOrg(name, orgId);
+    if (byNameOrg?.id) {
+      logger.info(
+        `[pd-person] adopting existing person ${byNameOrg.id} for "${name}" @ org ${orgId} by name+org match`,
+      );
+      return updatePerson(byNameOrg.id, person, orgId);
     }
   }
   logger.debug(`[pd-person] creating person ${fullName(person)}`);
