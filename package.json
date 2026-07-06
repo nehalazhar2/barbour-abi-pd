@@ -1,0 +1,21 @@
+{
+  "name": "barbourabi-pipedrive-sync",
+  "version": "0.1.0",
+  "description": "Daily sync of Barbour ABI construction projects into Pipedrive CRM.",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.3",
+    "resend": "^6.13.0"
+  }
+}

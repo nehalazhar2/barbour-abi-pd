@@ -1,0 +1,41 @@
+# DigitalOcean App Platform spec — Barbour ABI → Pipedrive sync
+# ------------------------------------------------------------------
+# This declares a long-running Worker (not a Web Service, not a Job).
+# Rationale: node-cron schedules the daily sync in-process, so we need
+# a container that stays up 24/7. A Web Service would work too, but it
+# forces us to open an HTTP port we don't need. A Scheduled Job would
+# require ripping out node-cron and letting DO invoke the process each
+# tick — bigger refactor, no benefit for once-daily cadence.
+#
+# Secrets (BARBOURABI_*, PIPEDRIVE_API_TOKEN, RESEND_API_KEY, PD_LABEL_*,
+# PD_FIELD_*) MUST be added in the DO UI as env-var SECRETs — not in this
+# file. Anything committed to git is public-repo-visible even in private
+# repos as far as the developer's local machine is concerned; SECRETs
+# are AES-encrypted at rest by DO and only decrypted into the running
+# container's env.
+name: barbour-abi-pd
+region: lon
+
+workers:
+  - name: sync
+    github:
+      repo: nehalazhar2/barbour-abi-pd
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    environment_slug: node-js
+    build_command: npm ci --omit=dev
+    run_command: node src/index.js
+    instance_size_slug: basic-xxs
+    instance_count: 1
+    envs:
+      # Non-secret — safe to commit. Everything sensitive is set in the UI.
+      - key: NODE_ENV
+        value: production
+        scope: RUN_AND_BUILD_TIME
+      - key: LOG_LEVEL
+        value: info
+        scope: RUN_TIME
+      - key: TZ
+        value: Europe/London
+        scope: RUN_TIME
