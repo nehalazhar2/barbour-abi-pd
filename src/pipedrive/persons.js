@@ -2,6 +2,38 @@ import { requestV2 } from './client.js';
 import { wrapForV2, fields, searchByCustomField } from './customFields.js';
 import { logger } from '../utils/logger.js';
 
+// Exact-email fallback lookup. Used when Barbour-ID lookup misses so we can adopt
+// existing persons the client's team created manually before this integration.
+// Returns exactly 1 match or null — refuse to guess on 0 or 2+ matches.
+async function findPersonByExactEmail(email) {
+  if (!email) return null;
+  const res = await requestV2(
+    {
+      method: 'GET',
+      url: '/persons/search',
+      params: { term: email, fields: 'email', exact_match: true, limit: 5 },
+    },
+    { label: 'pd-personSearchByEmail' },
+  );
+  const items = res.data?.data?.items || [];
+  const target = email.toLowerCase();
+  const strict = items
+    .map((wrap) => wrap?.item || wrap)
+    .filter((p) => {
+      if (!p) return false;
+      const emails = p.emails || (p.email ? [{ value: p.email }] : []);
+      return emails.some((e) => (e?.value || '').toLowerCase() === target);
+    });
+  if (strict.length === 0) return null;
+  if (strict.length > 1) {
+    logger.warn(
+      `[pd-person] email "${email}" matches ${strict.length} PD persons (ids: ${strict.map((p) => p.id).join(', ')}) — refusing to auto-adopt, will create new.`,
+    );
+    return null;
+  }
+  return strict[0];
+}
+
 // Pipedrive v2 Persons:
 //   POST   /api/v2/persons
 //   PATCH  /api/v2/persons/{id}
@@ -59,11 +91,23 @@ export async function updatePerson(personId, person, orgId) {
 
 export async function upsertPerson(person, orgId) {
   if (!person?.person_id && !person?.email) return null;
+  // 1. Fast path: dedup by Barbour person ID.
   if (person.person_id) {
     const existing = await findPersonByBarbourId(person.person_id);
     if (existing?.id) {
       logger.debug(`[pd-person] updating person ${existing.id}`);
       return updatePerson(existing.id, person, orgId);
+    }
+  }
+  // 2. Legacy path: exact-email match against persons the client's team created
+  //    manually. Adopting writes our Barbour person ID onto them.
+  if (person.email) {
+    const byEmail = await findPersonByExactEmail(person.email);
+    if (byEmail?.id) {
+      logger.info(
+        `[pd-person] adopting existing person ${byEmail.id} for "${person.email}" by email match`,
+      );
+      return updatePerson(byEmail.id, person, orgId);
     }
   }
   logger.debug(`[pd-person] creating person ${fullName(person)}`);
