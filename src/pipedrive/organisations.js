@@ -99,9 +99,47 @@ export async function createOrg(role) {
   return res.data?.data;
 }
 
-export async function updateOrg(orgId, role) {
+// Resolve whether the org already has a non-empty address. Two response shapes
+// to handle: /api/v2/organizations/{id} returns { address: { value, ... } };
+// itemSearch and organizations/search sometimes return a bare string, sometimes
+// nothing at all. When we can't tell from the passed-in object, do a single GET
+// to be certain. Errs on preserve: if we can't verify, we skip writing.
+function readAddressString(addr) {
+  if (!addr) return '';
+  if (typeof addr === 'string') return addr.trim();
+  if (typeof addr === 'object' && typeof addr.value === 'string') return addr.value.trim();
+  return '';
+}
+
+async function hasExistingAddress(existingOrg) {
+  if (!existingOrg) return false;
+  if ('address' in existingOrg) return readAddressString(existingOrg.address) !== '';
+  try {
+    const res = await requestV2(
+      { method: 'GET', url: `/organizations/${existingOrg.id}` },
+      { label: 'pd-orgReadAddress' },
+    );
+    return readAddressString(res.data?.data?.address) !== '';
+  } catch {
+    return true; // failsafe — assume address exists so we don't clobber
+  }
+}
+
+export async function updateOrg(orgId, role, existingOrg = null) {
+  // Protect manually-set addresses. If the org already has one (either the
+  // client's team's entry or an earlier value we or they wrote), don't overwrite.
+  // We only write address when the target field is empty.
+  let roleForBody = role;
+  if (role.company_address && existingOrg) {
+    const already = await hasExistingAddress(existingOrg);
+    if (already) {
+      const { company_address: _drop, ...rest } = role;
+      roleForBody = rest;
+      logger.debug(`[pd-org] preserving existing address on org ${orgId}`);
+    }
+  }
   const res = await requestV2(
-    { method: 'PATCH', url: `/organizations/${orgId}`, data: buildOrgBody(role) },
+    { method: 'PATCH', url: `/organizations/${orgId}`, data: buildOrgBody(roleForBody) },
     { label: 'pd-updateOrg' },
   );
   return res.data?.data;
@@ -113,7 +151,7 @@ export async function upsertOrg(role) {
   const existing = await findOrgByBarbourId(enriched.company_id);
   if (existing?.id) {
     logger.debug(`[pd-org] updating org ${existing.id} (${enriched.company_name})`);
-    return updateOrg(existing.id, enriched);
+    return updateOrg(existing.id, enriched, existing);
   }
   // 2. Legacy path: exact-name match against orgs the client's team created
   //    manually before this integration. Adopting writes our Barbour ID onto
@@ -123,7 +161,7 @@ export async function upsertOrg(role) {
     logger.info(
       `[pd-org] adopting existing org ${byName.id} for "${enriched.company_name}" by name match`,
     );
-    return updateOrg(byName.id, enriched);
+    return updateOrg(byName.id, enriched, byName);
   }
   logger.debug(`[pd-org] creating org (${enriched.company_name})`);
   return createOrg(enriched);
