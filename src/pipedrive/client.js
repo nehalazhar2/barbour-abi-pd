@@ -3,6 +3,22 @@ import { config } from '../config.js';
 import { withRetry } from '../utils/retry.js';
 import { logger } from '../utils/logger.js';
 
+// Client-side rate limiter — Pipedrive's per-token cap is roughly 10 req/s
+// sustained, and the first production run hit sustained 429s that only recovered
+// via exp-backoff (adding ~7s of dead time per hit). 150ms between request starts
+// keeps us at ~6.6 req/s, comfortably under the limit, and eliminates 429s at
+// source. `lastCallAt` is "reserved" before the sleep so concurrent callers
+// serialise correctly instead of all racing on the same timestamp.
+const MIN_INTERVAL_MS = 150;
+let lastCallAt = 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function throttle() {
+  const now = Date.now();
+  const waitMs = Math.max(0, MIN_INTERVAL_MS - (now - lastCallAt));
+  lastCallAt = now + waitMs;
+  if (waitMs > 0) await sleep(waitMs);
+}
+
 const authParams = () => ({ api_token: config.pipedrive.apiToken });
 
 const v1 = axios.create({
@@ -43,12 +59,24 @@ export function requestV1(opts, retryOpts = {}) {
   const label = retryOpts.label || `pd-v1 ${opts.method || 'GET'} ${opts.url}`;
   const stub = maybeDryRun(opts, 'pd-v1');
   if (stub) return Promise.resolve(stub);
-  return withRetry(() => v1.request(opts), { ...retryOpts, label });
+  return withRetry(
+    async () => {
+      await throttle();
+      return v1.request(opts);
+    },
+    { ...retryOpts, label },
+  );
 }
 
 export function requestV2(opts, retryOpts = {}) {
   const label = retryOpts.label || `pd-v2 ${opts.method || 'GET'} ${opts.url}`;
   const stub = maybeDryRun(opts, 'pd-v2');
   if (stub) return Promise.resolve(stub);
-  return withRetry(() => v2.request(opts), { ...retryOpts, label });
+  return withRetry(
+    async () => {
+      await throttle();
+      return v2.request(opts);
+    },
+    { ...retryOpts, label },
+  );
 }
