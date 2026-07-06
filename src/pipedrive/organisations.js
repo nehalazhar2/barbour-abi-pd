@@ -1,5 +1,6 @@
 import { requestV2 } from './client.js';
 import { wrapForV2, fields, searchByCustomField } from './customFields.js';
+import { getCompany, formatCompanyAddress } from '../barbourabi/companies.js';
 import { logger } from '../utils/logger.js';
 
 // Pipedrive v2 Organizations:
@@ -66,6 +67,9 @@ function buildOrgBody(role) {
   // write company_phone into that. Barbour IDs are numeric — varchar custom fields
   // demand strings, so coerce.
   const body = { name: role.company_name };
+  // Address is set from the /companies/{id} enrichment step upstream. PD's v2 org
+  // API accepts `address` as a display string and geocodes it server-side.
+  if (role.company_address) body.address = role.company_address;
   const customFieldValues = {
     [fields.org.barbourCompanyId]: role.company_id != null ? String(role.company_id) : undefined,
     [fields.org.barbourRole]: role.role_name,
@@ -74,6 +78,17 @@ function buildOrgBody(role) {
     [fields.org.phone]: role.company_phone || undefined,
   };
   return { ...body, ...wrapForV2(customFieldValues) };
+}
+
+// Enrich the raw role with company_address pulled from Barbour /companies/{id}.
+// Cached by getCompany, so multiple roles at the same company share one API call.
+// Falls back gracefully — if Barbour returns nothing or the fetch fails, the org
+// is still upserted, just without an address.
+async function enrichRoleWithAddress(role) {
+  if (!role?.company_id || role.company_address) return role;
+  const company = await getCompany(role.company_id);
+  const address = formatCompanyAddress(company);
+  return address ? { ...role, company_address: address } : role;
 }
 
 export async function createOrg(role) {
@@ -93,22 +108,23 @@ export async function updateOrg(orgId, role) {
 }
 
 export async function upsertOrg(role) {
+  const enriched = await enrichRoleWithAddress(role);
   // 1. Fast path: dedup by our own Barbour company ID custom field.
-  const existing = await findOrgByBarbourId(role.company_id);
+  const existing = await findOrgByBarbourId(enriched.company_id);
   if (existing?.id) {
-    logger.debug(`[pd-org] updating org ${existing.id} (${role.company_name})`);
-    return updateOrg(existing.id, role);
+    logger.debug(`[pd-org] updating org ${existing.id} (${enriched.company_name})`);
+    return updateOrg(existing.id, enriched);
   }
   // 2. Legacy path: exact-name match against orgs the client's team created
   //    manually before this integration. Adopting writes our Barbour ID onto
   //    the existing org, so tomorrow's sync uses the fast path.
-  const byName = await findOrgByExactName(role.company_name);
+  const byName = await findOrgByExactName(enriched.company_name);
   if (byName?.id) {
     logger.info(
-      `[pd-org] adopting existing org ${byName.id} for "${role.company_name}" by name match`,
+      `[pd-org] adopting existing org ${byName.id} for "${enriched.company_name}" by name match`,
     );
-    return updateOrg(byName.id, role);
+    return updateOrg(byName.id, enriched);
   }
-  logger.debug(`[pd-org] creating org (${role.company_name})`);
-  return createOrg(role);
+  logger.debug(`[pd-org] creating org (${enriched.company_name})`);
+  return createOrg(enriched);
 }
