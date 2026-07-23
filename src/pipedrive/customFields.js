@@ -87,6 +87,11 @@ export async function searchByCustomField(itemType, fieldKey, value) {
         cf = undefined;
       }
     }
+    // Skip soft-deleted items — PD's itemSearch still returns them (deletion
+    // just flips is_deleted / active_flag) and updating one 403s with
+    // "Cannot update a deleted <entity>". The verify-fetch above populates
+    // is_deleted / active_flag on org & person GETs.
+    if (item?.is_deleted === true || item?.active_flag === false) continue;
     if (String(cf) === String(value)) return item;
   }
   return null;
