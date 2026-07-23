@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { getRolesForProject } from '../barbourabi/roles.js';
 import { getSectorName } from '../barbourabi/lookups.js';
+import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
 import { upsertOrg } from '../pipedrive/organisations.js';
 import { upsertPerson } from '../pipedrive/persons.js';
 import { upsertLead, addNoteToLead, clearIntegrationNotes } from '../pipedrive/leads.js';
@@ -185,6 +186,53 @@ export async function processProject(project, { ownerId, source } = {}) {
   const primaryPersonId = primaryContactRole
     ? personByBarbourCompanyId[primaryContactRole.company_id]
     : undefined;
+
+  // "People on Other Projects" enrichment. Runs on every non-shell project. For
+  // each org attached to the lead we pull Barbour's known-people list, filter to
+  // Ben's job-title keywords, and upsert them onto the Organisation with the PoOP
+  // label. They are NOT promoted to the lead's primary Person — that stays as
+  // whatever real project contact Barbour gave us (or nothing).
+  const poopLabelId = config.pipedrive.personLabels?.peopleOnOtherProjects;
+  const titleKeywords = config.pipedrive.peopleOnOtherProjectsJobTitles || [];
+  if (!usingShellOrg && poopLabelId) {
+    const maxPerOrg = config.pipedrive.peopleOnOtherProjectsMax;
+    const matchesTitle = (t) => {
+      if (titleKeywords.length === 0) return true; // opt-out: no filter = include all
+      const lower = (t || '').toLowerCase();
+      return titleKeywords.some((k) => lower.includes(k));
+    };
+    // Dedup by company_id — same company can appear under multiple roles
+    // (e.g. Anglian Water as both Client and Architect) and we don't want to
+    // pull + upsert the same 30 people twice.
+    const seenCompanyIds = new Set();
+    for (const role of roles) {
+      if (seenCompanyIds.has(role.company_id)) continue;
+      seenCompanyIds.add(role.company_id);
+      const pdOrgId = orgByBarbourCompanyId[role.company_id];
+      if (!pdOrgId) continue;
+      const raw = await getCompanyPeople(role.company_id, { limit: 200 });
+      const filtered = raw.filter((p) => matchesTitle(p.person_job_title || p.person_title));
+      const slice = filtered.slice(0, maxPerOrg);
+      if (slice.length === 0) {
+        logger.debug(
+          `[process] project ${projectId}: PoOP at ${role.company_name} — 0/${raw.length} matched job titles`,
+        );
+        continue;
+      }
+      logger.info(
+        `[process] project ${projectId}: PoOP at ${role.company_name} — attaching ${slice.length}/${raw.length} matched people`,
+      );
+      for (const p of slice) {
+        try {
+          await upsertPerson(normalisePerson(p), pdOrgId, { addLabelId: poopLabelId });
+        } catch (err) {
+          logger.warn(
+            `[process] PoOP upsert failed for ${p.person_first_name || ''} ${p.person_last_name || ''} at ${role.company_name}: ${err.message}`,
+          );
+        }
+      }
+    }
+  }
 
   // Per-role structured Org fields on the Lead. Skipped for shell leads (no real roles).
   const { customFieldValues: roleOrgFieldValues, claimedCompanyIds } = usingShellOrg

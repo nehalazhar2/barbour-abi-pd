@@ -67,9 +67,10 @@ function buildOrgBody(role) {
   // write company_phone into that. Barbour IDs are numeric — varchar custom fields
   // demand strings, so coerce.
   const body = { name: role.company_name };
-  // Address is set from the /companies/{id} enrichment step upstream. PD's v2 org
-  // API accepts `address` as a display string and geocodes it server-side.
-  if (role.company_address) body.address = role.company_address;
+  // Address must be an object on v2 (`{ value: "..." }`) — sending a bare string
+  // yields `Validation failed: address: The value is not a valid 'array'`. PD
+  // geocodes the value server-side.
+  if (role.company_address) body.address = { value: role.company_address };
   const customFieldValues = {
     [fields.org.barbourCompanyId]: role.company_id != null ? String(role.company_id) : undefined,
     [fields.org.barbourRole]: role.role_name,

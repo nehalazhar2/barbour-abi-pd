@@ -35,6 +35,42 @@ export async function getCompany(companyId) {
   }
 }
 
+// Barbour ABI v4 /companies/{company_id}/people:
+//   GET → { aggregation: { people_count }, people: [ { person_id, person_first_name,
+//          person_last_name, person_email?, person_mobile?, person_title?,
+//          person_job_title? }, ... ] }
+// Same list Barbour's UI shows under "People on Other Projects" for a company.
+// A single company can have 20+ known people, so callers cap what they upsert.
+export async function getCompanyPeople(companyId, { limit = 100 } = {}) {
+  if (!companyId) return [];
+  try {
+    const res = await request(
+      { method: 'GET', url: `/companies/${companyId}/people`, params: { limit } },
+      { label: 'barbourabi-getCompanyPeople' },
+    );
+    return res.data?.people || [];
+  } catch (err) {
+    logger.warn(
+      `[barbourabi-companies] failed to fetch people for company ${companyId}: ${err.message}`,
+    );
+    return [];
+  }
+}
+
+// Normalise a person record from either /roles (people[]) or /companies/{id}/people
+// into the shape upsertPerson expects: { person_id, first_name, last_name, email, phone }.
+// The two Barbour endpoints use slightly different key names for the same fields.
+export function normalisePerson(raw) {
+  if (!raw) return null;
+  return {
+    person_id: raw.person_id,
+    first_name: raw.first_name ?? raw.person_first_name,
+    last_name: raw.last_name ?? raw.person_last_name,
+    email: raw.email ?? raw.person_email,
+    phone: raw.phone ?? raw.person_mobile,
+  };
+}
+
 // Concatenate the sparse Barbour address fields into a PD-friendly single string.
 // PD's built-in `address` on organizations is a display string; PD geocodes it
 // server-side. Order matters — street, city, county, postcode reads naturally.

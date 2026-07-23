@@ -89,31 +89,44 @@ export const config = {
       // Reportable per-role Org fields on the Lead/Deal. Key = exact Barbour role_name
       // (case-insensitive match in processProject). Each holds ONE org id; additional
       // orgs of the same role fall through to the associated-companies note.
-      // Insertion order = PD sidebar order, so the 3 client-priority slots come first.
+      // Insertion order = fixed slot mapping — Org 1..8 in PD sidebar.
+      // Only these 8 roles are pulled from Barbour (see barbourabi.rolesToSync default).
       leadOrgByRole: {
-        // Priority (top of PD section)
-        'Civil engineer': process.env.PD_FIELD_LEAD_ORG_CIVIL,
-        Contractor: process.env.PD_FIELD_LEAD_ORG_CONTRACTOR,
-        'Groundworks contractor': process.env.PD_FIELD_LEAD_ORG_GROUNDWORKS,
-        // Standard
-        Client: process.env.PD_FIELD_LEAD_ORG_CLIENT,
-        Architect: process.env.PD_FIELD_LEAD_ORG_ARCHITECT,
-        'Quantity surveyor': process.env.PD_FIELD_LEAD_ORG_QS,
-        Planner: process.env.PD_FIELD_LEAD_ORG_PLANNER,
-        'Sustainability consultant': process.env.PD_FIELD_LEAD_ORG_SUSTAINABILITY,
-        'Drainage subcontractor': process.env.PD_FIELD_LEAD_ORG_DRAINAGE,
-        // Legacy (kept populating — client may revisit; safe to retain)
-        'Structural engineer': process.env.PD_FIELD_LEAD_ORG_STRUCTURAL,
-        'M&E Consultant': process.env.PD_FIELD_LEAD_ORG_ME_CONSULTANT,
-        'Project manager': process.env.PD_FIELD_LEAD_ORG_PROJECT_MANAGER,
-        Developer: process.env.PD_FIELD_LEAD_ORG_DEVELOPER,
-        'Transport consultant': process.env.PD_FIELD_LEAD_ORG_TRANSPORT,
-        Agent: process.env.PD_FIELD_LEAD_ORG_AGENT,
+        Client: process.env.PD_FIELD_LEAD_ORG_CLIENT, // Org 1
+        'Civil engineer': process.env.PD_FIELD_LEAD_ORG_CIVIL, // Org 2
+        Contractor: process.env.PD_FIELD_LEAD_ORG_CONTRACTOR, // Org 3
+        Architect: process.env.PD_FIELD_LEAD_ORG_ARCHITECT, // Org 4
+        'Quantity surveyor': process.env.PD_FIELD_LEAD_ORG_QS, // Org 5
+        'Drainage subcontractor': process.env.PD_FIELD_LEAD_ORG_DRAINAGE, // Org 6
+        'Sustainability consultant': process.env.PD_FIELD_LEAD_ORG_SUSTAINABILITY, // Org 7
+        'Groundworks contractor': process.env.PD_FIELD_LEAD_ORG_GROUNDWORKS, // Org 8
       },
       person: {
         barbourPersonId: process.env.PD_FIELD_PERSON_BARBOUR_ID,
       },
     },
+    // Person label applied to fallback contacts pulled from Barbour's
+    // /companies/{id}/people ("People on Other Projects"). Integer option id on
+    // the built-in PD Person "Label" enum field.
+    personLabels: {
+      peopleOnOtherProjects: process.env.PD_LABEL_PERSON_POOP
+        ? Number(process.env.PD_LABEL_PERSON_POOP)
+        : undefined,
+    },
+    // Safety ceiling per org for PoOP upserts. Ben's job-title filter usually keeps
+    // this well below the cap; it only fires as a runaway backstop.
+    peopleOnOtherProjectsMax: parseInt(
+      process.env.PEOPLE_ON_OTHER_PROJECTS_MAX || '100',
+      10,
+    ),
+    // Client-provided job-title keywords for the PoOP filter. Case-insensitive
+    // substring match against Barbour's person_job_title. Empty list → include
+    // everyone (opt-out).
+    peopleOnOtherProjectsJobTitles:
+      (process.env.PEOPLE_ON_OTHER_PROJECTS_JOB_TITLES || '')
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
   },
   products: {
     ironwork: parseFloat(process.env.PRODUCT_PCT_IRONWORK || '0.00004'),

@@ -37,7 +37,16 @@ export async function withRetry(fn, opts = {}) {
       return await fn();
     } catch (err) {
       const canRetry = attempt < retries && shouldRetry(err);
-      if (!canRetry) throw err;
+      if (!canRetry) {
+        // Surface PD/Barbour's actual rejection body — otherwise callers only see
+        // "Request failed with status code 400" which is useless for debugging.
+        const body = err?.response?.data;
+        if (body !== undefined) {
+          const rendered = typeof body === 'string' ? body : JSON.stringify(body);
+          logger.error(`[retry] ${label} failed — response body: ${rendered}`);
+        }
+        throw err;
+      }
       const delay = baseMs * 2 ** attempt;
       const status = err?.response?.status ?? err?.code ?? 'err';
       logger.warn(

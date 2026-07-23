@@ -95,7 +95,7 @@ export async function findPersonByBarbourId(barbourPersonId) {
   return searchByCustomField('person', key, barbourPersonId);
 }
 
-function buildPersonBody(person, orgId) {
+function buildPersonBody(person, orgId, { labelIds } = {}) {
   const customFieldValues = {
     // Stringify — Barbour IDs are numeric but the varchar custom field demands string.
     [fields.person.barbourPersonId]: person.person_id != null ? String(person.person_id) : undefined,
@@ -104,26 +104,37 @@ function buildPersonBody(person, orgId) {
   if (person.email) body.emails = [{ value: person.email, primary: true, label: 'work' }];
   if (person.phone) body.phones = [{ value: person.phone, primary: true, label: 'work' }];
   if (orgId) body.org_id = orgId;
+  // PD v2 label_ids replaces on PATCH — caller passes the merged set (existing ∪ addLabelId).
+  if (Array.isArray(labelIds) && labelIds.length > 0) body.label_ids = labelIds;
   return { ...body, ...wrapForV2(customFieldValues) };
 }
 
-export async function createPerson(person, orgId) {
+export async function createPerson(person, orgId, opts = {}) {
   const res = await requestV2(
-    { method: 'POST', url: '/persons', data: buildPersonBody(person, orgId) },
+    { method: 'POST', url: '/persons', data: buildPersonBody(person, orgId, opts) },
     { label: 'pd-createPerson' },
   );
   return res.data?.data;
 }
 
-export async function updatePerson(personId, person, orgId) {
+export async function updatePerson(personId, person, orgId, opts = {}) {
   const res = await requestV2(
-    { method: 'PATCH', url: `/persons/${personId}`, data: buildPersonBody(person, orgId) },
+    { method: 'PATCH', url: `/persons/${personId}`, data: buildPersonBody(person, orgId, opts) },
     { label: 'pd-updatePerson' },
   );
   return res.data?.data;
 }
 
-export async function upsertPerson(person, orgId) {
+// Merge an addLabelId (single option id) with an existing person's label_ids to
+// avoid clobbering user-applied labels on updates. Returns undefined when no
+// label add is requested, so callers can pass through unchanged.
+function mergeLabelIds(existingPerson, addLabelId) {
+  if (!addLabelId) return undefined;
+  const existing = Array.isArray(existingPerson?.label_ids) ? existingPerson.label_ids : [];
+  return Array.from(new Set([...existing, addLabelId]));
+}
+
+export async function upsertPerson(person, orgId, { addLabelId } = {}) {
   if (!person) return null;
   const hasName = !!(person.first_name || person.last_name);
   // Nothing to key on — skip. Would just create a nameless "Unknown" row.
@@ -134,7 +145,7 @@ export async function upsertPerson(person, orgId) {
     const existing = await findPersonByBarbourId(person.person_id);
     if (existing?.id) {
       logger.debug(`[pd-person] updating person ${existing.id}`);
-      return updatePerson(existing.id, person, orgId);
+      return updatePerson(existing.id, person, orgId, { labelIds: mergeLabelIds(existing, addLabelId) });
     }
   }
   // 2. Email match — adopts persons the client's team created manually.
@@ -144,7 +155,7 @@ export async function upsertPerson(person, orgId) {
       logger.info(
         `[pd-person] adopting existing person ${byEmail.id} for "${person.email}" by email match`,
       );
-      return updatePerson(byEmail.id, person, orgId);
+      return updatePerson(byEmail.id, person, orgId, { labelIds: mergeLabelIds(byEmail, addLabelId) });
     }
   }
   // 3. Name + org match — covers Barbour persons that arrive without an email
@@ -157,9 +168,9 @@ export async function upsertPerson(person, orgId) {
       logger.info(
         `[pd-person] adopting existing person ${byNameOrg.id} for "${name}" @ org ${orgId} by name+org match`,
       );
-      return updatePerson(byNameOrg.id, person, orgId);
+      return updatePerson(byNameOrg.id, person, orgId, { labelIds: mergeLabelIds(byNameOrg, addLabelId) });
     }
   }
   logger.debug(`[pd-person] creating person ${fullName(person)}`);
-  return createPerson(person, orgId);
+  return createPerson(person, orgId, { labelIds: addLabelId ? [addLabelId] : undefined });
 }
