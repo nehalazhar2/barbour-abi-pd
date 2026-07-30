@@ -4,6 +4,7 @@ import { logger } from './utils/logger.js';
 import { sendFailureAlert } from './utils/alerts.js';
 import { runTagSync } from './sync/tagSync.js';
 import { runFilterSync } from './sync/filterSync.js';
+import { runRefreshSync } from './sync/refreshSync.js';
 
 let running = false;
 
@@ -25,21 +26,30 @@ async function runAll(trigger = 'cron') {
       logger.error(`[runAll] filterSync threw: ${err.message}`);
       return { error: err };
     });
+    // Refresh runs LAST — tag sync may have just moved projects onto the CRM
+    // tag, and we don't want to immediately re-process them via refresh in the
+    // same run. Running last means the earliest a tagged-and-swapped project
+    // gets refreshed is tomorrow's run, which is the intended semantics.
+    const refreshStats = await runRefreshSync().catch((err) => {
+      logger.error(`[runAll] refreshSync threw: ${err.message}`);
+      return { error: err };
+    });
 
     const secs = ((Date.now() - start) / 1000).toFixed(1);
     logger.info(
-      `[runAll] finished in ${secs}s — tag=${JSON.stringify(tagStats)} filter=${JSON.stringify(filterStats)}`,
+      `[runAll] finished in ${secs}s — tag=${JSON.stringify(tagStats)} filter=${JSON.stringify(filterStats)} refresh=${JSON.stringify(refreshStats)}`,
     );
 
-    // Alert on ANY sync failure, not just when both fail. A single-sync outage
-    // (e.g. filter-sync dies but tag-sync succeeds) still needs eyes on it.
+    // Alert on ANY sync failure, not just when all fail. A single-sync outage
+    // (e.g. refresh-sync dies but tag+filter succeed) still needs eyes on it.
     const failed = [];
     if (tagStats?.error) failed.push({ sync: 'tag', error: tagStats.error });
     if (filterStats?.error) failed.push({ sync: 'filter', error: filterStats.error });
+    if (refreshStats?.error) failed.push({ sync: 'refresh', error: refreshStats.error });
     if (failed.length > 0) {
       const summary = failed.map((f) => `${f.sync}=${f.error.message}`).join('; ');
       const alertErr = new Error(
-        failed.length === 2 ? `Both syncs failed: ${summary}` : `${failed[0].sync}-sync failed: ${summary}`,
+        failed.length > 1 ? `Multiple syncs failed: ${summary}` : `${failed[0].sync}-sync failed: ${summary}`,
       );
       await sendFailureAlert(alertErr, { trigger, failed: failed.map((f) => f.sync) });
     }

@@ -110,7 +110,7 @@ function pickPrimaryContactRole(roles, primaryName, preference = []) {
   return firstPersonlessMatch;
 }
 
-export async function processProject(project, { ownerId, source } = {}) {
+export async function processProject(project, { ownerId, source, preserveOwner = false, preserveLabels = false } = {}) {
   const projectId = project.project_id;
   const projectTitle = project.project_title || `Barbour project ${projectId}`;
   const projectValue = Number(project.project_value) || 0;
@@ -255,6 +255,7 @@ export async function processProject(project, { ownerId, source } = {}) {
     ownerId,
     source,
     roleOrgFieldValues,
+    { preserveOwner, preserveLabels },
   );
 
   // Wipe any legacy "Associated companies" notes left over from the pre-slot design.

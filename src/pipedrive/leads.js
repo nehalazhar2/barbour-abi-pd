@@ -124,11 +124,15 @@ export async function createLead(project, primaryOrgId, primaryPersonId, ironwor
   return res.data?.data;
 }
 
-export async function updateLead(leadId, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false } = {}) {
+export async function updateLead(leadId, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false } = {}) {
   const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields);
   // For legacy-adopted leads: the client's team already triaged them and set an
   // owner manually. Don't overwrite that.
   if (preserveOwner) delete body.owner_id;
+  // For refresh-sync updates: keep whatever source-labels were already on the lead
+  // (tag-sync vs filter-sync marker). Otherwise re-running would overwrite the
+  // original-source marker with whatever labelIdsForSource() returns for 'refresh'.
+  if (preserveLabels) delete body.label_ids;
   const res = await requestV1(
     { method: 'PATCH', url: `/leads/${leadId}`, data: body },
     { label: 'pd-updateLead' },
@@ -136,12 +140,16 @@ export async function updateLead(leadId, project, primaryOrgId, primaryPersonId,
   return res.data?.data;
 }
 
-export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields) {
+export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false } = {}) {
   const { lead: existing, viaLegacy } = await findLeadByBarbourId(project.project_id);
   if (existing?.id) {
     logger.debug(`[pd-lead] updating lead ${existing.id} (${project.project_title})${viaLegacy ? ' [adopted]' : ''}`);
     return {
-      lead: await updateLead(existing.id, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner: viaLegacy }),
+      lead: await updateLead(
+        existing.id, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields,
+        // Legacy-adoption path forces preserveOwner; caller flags are merged on top.
+        { preserveOwner: viaLegacy || preserveOwner, preserveLabels },
+      ),
       created: false,
       adopted: viaLegacy,
     };

@@ -47,6 +47,10 @@ export const config = {
     primaryContactRolePreference:
       parseRoles(process.env.PRIMARY_CONTACT_ROLE_PREFERENCE) || [],
     filterLookbackHours: parseInt(process.env.BARBOURABI_FILTER_LOOKBACK_HOURS || '24', 10),
+    // Refresh sync — how many days back to consider a CRM-tagged project "recently
+    // republished" and worth re-processing. Widened slightly vs filter lookback so
+    // a project republished on the weekend still gets picked up on Monday.
+    refreshLookbackDays: parseInt(process.env.BARBOURABI_REFRESH_LOOKBACK_DAYS || '3', 10),
     baseUrl: 'https://api.barbour-abi.com/v4',
     shellOrgName: process.env.BARBOURABI_SHELL_ORG_NAME || 'Barbour ABI – Awaiting role data',
     // Sentinel barbour_company_id used to dedup the shared placeholder org for shell leads.
