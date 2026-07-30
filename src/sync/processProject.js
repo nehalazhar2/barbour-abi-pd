@@ -5,31 +5,58 @@ import { getSectorName } from '../barbourabi/lookups.js';
 import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
 import { upsertOrg } from '../pipedrive/organisations.js';
 import { upsertPerson } from '../pipedrive/persons.js';
-import { upsertLead, addNoteToLead, clearIntegrationNotes } from '../pipedrive/leads.js';
+import { upsertLead, clearIntegrationNotes } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
 
-// Resolve per-role Org custom fields on the Lead. First role matching each configured
-// name (case-insensitive) claims the slot; subsequent same-role roles fall through to
-// the associated-companies note. Returns { customFieldValues, claimedCompanyIds }.
-function buildRoleOrgFieldAssignments(roles, orgByBarbourCompanyId) {
-  const map = fields.leadOrgByRole || {};
-  const customFieldValues = {};
-  const claimedCompanyIds = new Set();
-  for (const [roleName, fieldKey] of Object.entries(map)) {
-    if (!fieldKey) continue;
-    const lower = roleName.toLowerCase();
-    const match = roles.find(
-      (r) =>
-        (r.role_name || '').toLowerCase() === lower &&
-        !claimedCompanyIds.has(r.company_id),
-    );
-    if (!match) continue;
-    const pdOrgId = orgByBarbourCompanyId[match.company_id];
-    if (!pdOrgId) continue;
-    customFieldValues[fieldKey] = pdOrgId;
-    claimedCompanyIds.add(match.company_id);
+// Pack associated orgs into the ordered leadOrgSlots array. Primary org goes into
+// slot 1; the remaining orgs (deduped by company_id) fill slots 2..N in
+// BARBOURABI_ROLES config order — so Ben sees a contiguous list with no mid-list
+// gaps regardless of which roles a given project happens to include. Blank tail
+// slots are expected on projects with fewer than 15 orgs. Overflow (>15) is
+// silently dropped. Returns { customFieldValues }.
+function buildLeadOrgSlotAssignments(roles, primaryRole, orgByBarbourCompanyId) {
+  const slots = fields.leadOrgSlots || [];
+  if (slots.length === 0) return { customFieldValues: {} };
+
+  const rolesConfig = config.barbourabi.rolesToSync || [];
+  const roleOrder = new Map(rolesConfig.map((r, i) => [r.toLowerCase(), i]));
+  const roleRank = (r) => {
+    const idx = roleOrder.get((r.role_name || '').toLowerCase());
+    return idx == null ? Number.MAX_SAFE_INTEGER : idx;
+  };
+
+  const primaryCompanyId = primaryRole?.company_id;
+  const ordered = [];
+  const seen = new Set();
+
+  if (primaryCompanyId != null && orgByBarbourCompanyId[primaryCompanyId]) {
+    ordered.push(primaryRole);
+    seen.add(primaryCompanyId);
   }
-  return { customFieldValues, claimedCompanyIds };
+
+  const rest = roles
+    .filter((r) => !seen.has(r.company_id) && orgByBarbourCompanyId[r.company_id])
+    .sort((a, b) => roleRank(a) - roleRank(b));
+
+  for (const r of rest) {
+    if (seen.has(r.company_id)) continue;
+    ordered.push(r);
+    seen.add(r.company_id);
+  }
+
+  const customFieldValues = {};
+  for (let i = 0; i < Math.min(ordered.length, slots.length); i += 1) {
+    const key = slots[i];
+    const pdOrgId = orgByBarbourCompanyId[ordered[i].company_id];
+    if (key && pdOrgId) customFieldValues[key] = pdOrgId;
+  }
+  if (ordered.length > slots.length) {
+    logger.warn(
+      `[process] ${ordered.length} orgs exceeds ${slots.length} slots — ` +
+        `dropping ${ordered.length - slots.length} from tail`,
+    );
+  }
+  return { customFieldValues };
 }
 
 // Filter on the SPECIFIC role_name (e.g. "Architect", "Client", "Contractor"),
@@ -49,44 +76,6 @@ function excludeRolesByName(roles, exclude) {
 const roleNameEquals = (role, name) =>
   (role.role_name || '').toLowerCase() === (name || '').toLowerCase();
 
-// Escape minimal HTML so company / person names with `<`, `&`, etc don't break the note.
-const escapeHtml = (s) =>
-  String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-
-// HTML body for an "associated company" lead note. Org name is hyperlinked to the
-// org's PD page; if a contact person exists, it's hyperlinked too. PD's note editor
-// preserves HTML and auto-adds target="_blank" on anchors.
-function renderAssociatedCompanyNote(role, pdOrgId, pdPersonId) {
-  const base = config.pipedrive.appBaseUrl || '';
-  const orgLabel = escapeHtml(role.company_name || 'Unknown company');
-  const roleLabel = escapeHtml(role.role_name || 'role');
-  const orgAnchor = pdOrgId && base
-    ? `<a href="${base}/organization/${pdOrgId}">${orgLabel}</a>`
-    : `<b>${orgLabel}</b>`;
-  let line = `Associated company: ${orgAnchor} (${roleLabel})`;
-  // Show the first contact person if one came through Barbour.
-  const firstPerson = (role.persons || [])[0];
-  if (firstPerson) {
-    const personName = escapeHtml(
-      [firstPerson.first_name, firstPerson.last_name].filter(Boolean).join(' ') ||
-        firstPerson.email ||
-        'contact',
-    );
-    const personAnchor = pdPersonId && base
-      ? `<a href="${base}/person/${pdPersonId}">${personName}</a>`
-      : personName;
-    line += ` — contact: ${personAnchor}`;
-  }
-  if (role.company_phone) {
-    line += ` — ${escapeHtml(role.company_phone)}`;
-  }
-  return line;
-}
-
 // Org pick: exact match on PRIMARY_ORG_ROLE; falls back through PRIMARY_ROLE_PREFERENCE
 // (substring match, mirroring the legacy behaviour) then first role.
 function pickPrimaryOrgRole(roles, primaryName, preference) {
@@ -101,14 +90,24 @@ function pickPrimaryOrgRole(roles, primaryName, preference) {
   return roles[0];
 }
 
-// Contact pick: exact match on PRIMARY_CONTACT_ROLE. When there are multiple matches
-// (e.g. two "Civil engineer" roles), prefer one that actually has a contact person
-// in Barbour — otherwise the lead gets created with no person attached even though
-// a sibling role had a usable contact. Falls back to first match (any), then null.
-function pickPrimaryContactRole(roles, primaryName) {
-  const matches = roles.filter((r) => roleNameEquals(r, primaryName));
-  if (matches.length === 0) return null;
-  return matches.find((r) => (r.persons || []).length > 0) || matches[0];
+// Contact pick: walk PRIMARY_CONTACT_ROLE then each role in
+// PRIMARY_CONTACT_ROLE_PREFERENCE. All matches are exact (case-insensitive).
+// The whole chain is searched for a match that HAS a Barbour person on it —
+// otherwise a Civil engineer role with no attached contacts would block the fallback
+// even when the next role in the chain has a real contact. Only if no role in the
+// chain has a person do we fall back to the first personless match (still useful as
+// primary Org context). Returns null only when nothing in the chain matches at all.
+function pickPrimaryContactRole(roles, primaryName, preference = []) {
+  const chain = [primaryName, ...preference].filter(Boolean);
+  let firstPersonlessMatch = null;
+  for (const name of chain) {
+    const matches = roles.filter((r) => roleNameEquals(r, name));
+    if (matches.length === 0) continue;
+    const withPerson = matches.find((r) => (r.persons || []).length > 0);
+    if (withPerson) return withPerson;
+    if (!firstPersonlessMatch) firstPersonlessMatch = matches[0];
+  }
+  return firstPersonlessMatch;
 }
 
 export async function processProject(project, { ownerId, source } = {}) {
@@ -174,10 +173,17 @@ export async function processProject(project, { ownerId, source } = {}) {
       config.barbourabi.primaryOrgRole,
       config.barbourabi.primaryRolePreference,
     );
-    primaryContactRole = pickPrimaryContactRole(roles, config.barbourabi.primaryContactRole);
+    primaryContactRole = pickPrimaryContactRole(
+      roles,
+      config.barbourabi.primaryContactRole,
+      config.barbourabi.primaryContactRolePreference,
+    );
     if (!primaryContactRole) {
+      const chain = [config.barbourabi.primaryContactRole, ...config.barbourabi.primaryContactRolePreference]
+        .filter(Boolean)
+        .join(' → ');
       logger.info(
-        `[process] project ${projectId}: no "${config.barbourabi.primaryContactRole}" role — lead will be created without a person`,
+        `[process] project ${projectId}: no role matched contact chain "${chain}" — lead will be created without a person`,
       );
     }
   }
@@ -234,10 +240,11 @@ export async function processProject(project, { ownerId, source } = {}) {
     }
   }
 
-  // Per-role structured Org fields on the Lead. Skipped for shell leads (no real roles).
-  const { customFieldValues: roleOrgFieldValues, claimedCompanyIds } = usingShellOrg
-    ? { customFieldValues: {}, claimedCompanyIds: new Set() }
-    : buildRoleOrgFieldAssignments(roles, orgByBarbourCompanyId);
+  // Pack every associated org into slots 1..15 (primary → slot 1, rest packed in
+  // BARBOURABI_ROLES config order). Skipped for shell leads.
+  const { customFieldValues: roleOrgFieldValues } = usingShellOrg
+    ? { customFieldValues: {} }
+    : buildLeadOrgSlotAssignments(roles, primaryOrgRole, orgByBarbourCompanyId);
 
   const { lead, created } = await upsertLead(
     project,
@@ -250,36 +257,27 @@ export async function processProject(project, { ownerId, source } = {}) {
     roleOrgFieldValues,
   );
 
+  // Wipe any legacy "Associated companies" notes left over from the pre-slot design.
+  // We no longer add integration notes, so this is one-time cleanup on re-sync.
+  // User-authored notes are left untouched.
   if (lead?.id && !usingShellOrg) {
-    // "Additional companies" note covers every role that didn't land in either the
-    // primary org/contact slot OR a per-role structured Org custom field. Duplicate
-    // same-role orgs (2nd Architect, 2nd Transport Consultant, etc.) land here.
-    const primaryOrgCompanyId = primaryOrgRole?.company_id;
-    const primaryContactCompanyId = primaryContactRole?.company_id;
-    const others = roles.filter(
-      (r) =>
-        r.company_id !== primaryOrgCompanyId &&
-        r.company_id !== primaryContactCompanyId &&
-        !claimedCompanyIds.has(r.company_id),
-    );
-    // Wipe any prior-sync integration notes so re-runs don't accumulate duplicates.
-    // User-authored notes are left untouched.
     try {
       const cleared = await clearIntegrationNotes(lead.id);
-      if (cleared > 0) logger.debug(`[process] cleared ${cleared} prior integration note(s) on lead ${lead.id}`);
+      if (cleared > 0) logger.debug(`[process] cleared ${cleared} legacy integration note(s) on lead ${lead.id}`);
     } catch (err) {
-      logger.warn(`[process] could not clear prior notes on lead ${lead.id}: ${err.message}`);
-    }
-    for (const role of others) {
-      try {
-        const pdOrgId = orgByBarbourCompanyId[role.company_id];
-        const pdPersonId = personByBarbourCompanyId[role.company_id];
-        await addNoteToLead(lead.id, renderAssociatedCompanyNote(role, pdOrgId, pdPersonId));
-      } catch (err) {
-        logger.warn(`[process] could not add note for ${role.company_name}: ${err.message}`);
-      }
+      logger.warn(`[process] could not clear legacy notes on lead ${lead.id}: ${err.message}`);
     }
   }
 
   return { leadId: lead?.id, created, orgCount: Object.keys(orgByBarbourCompanyId).length };
 }
+
+// Test-only surface. Kept internal-looking so callers know these are unstable
+// helpers that exist for smoke tests; production code should call processProject.
+export const __test__ = {
+  buildLeadOrgSlotAssignments,
+  pickPrimaryOrgRole,
+  pickPrimaryContactRole,
+  filterRoles,
+  excludeRolesByName,
+};

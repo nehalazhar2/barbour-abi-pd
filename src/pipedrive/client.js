@@ -50,7 +50,14 @@ function maybeDryRun(opts, apiLabel) {
   if (!WRITE_METHODS.has(method)) return null;
   dryRunCounter += 1;
   const fakeId = `dry-run-${dryRunCounter}`;
-  logger.info(`[DRY RUN] ${apiLabel} ${method} ${opts.url} → skipped (fake id ${fakeId})`);
+  // Include a truncated body snippet so DRY_RUN actually shows what WOULD be sent
+  // (URL alone doesn't tell you if the payload shape is right).
+  let bodySnippet = '';
+  if (opts.data != null) {
+    const s = JSON.stringify(opts.data);
+    bodySnippet = ` body=${s.length > 2000 ? s.slice(0, 2000) + '…' : s}`;
+  }
+  logger.info(`[DRY RUN] ${apiLabel} ${method} ${opts.url} → skipped (fake id ${fakeId})${bodySnippet}`);
   // Mimic Pipedrive's typical { data: { id, ... } } envelope so callers reading res.data?.data?.id work.
   return { data: { data: { id: fakeId } } };
 }

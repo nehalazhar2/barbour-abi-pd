@@ -1,6 +1,7 @@
 import { requestV2 } from './client.js';
-import { wrapForV2, fields, searchByCustomField } from './customFields.js';
+import { wrapForV2, fields, searchByCustomField, readCustomField } from './customFields.js';
 import { getCompany, formatCompanyAddress } from '../barbourabi/companies.js';
+import { getOrgRoleTypeOptions, resolveRoleOptionId, unionOptionIds } from './orgFieldOptions.js';
 import { logger } from '../utils/logger.js';
 
 // Pipedrive v2 Organizations:
@@ -61,7 +62,11 @@ async function findOrgByExactName(name) {
   return strict[0];
 }
 
-function buildOrgBody(role) {
+// Build the org body. `roleTypeIds` (optional) is the *final* option-id list to
+// write to the multi-option Barbour Role Types field — caller has already unioned
+// existing ids with the new role. Pass null/undefined to skip writing that field
+// entirely (avoids clearing existing options on partial updates).
+function buildOrgBody(role, roleTypeIds) {
   // PD does NOT accept built-in `phone`/`phones` on v2 org create — verified 400.
   // Customer added a custom Phone field (`PD_FIELD_ORG_PHONE`, type `phone`) so we
   // write company_phone into that. Barbour IDs are numeric — varchar custom fields
@@ -71,13 +76,25 @@ function buildOrgBody(role) {
   // yields `Validation failed: address: The value is not a valid 'array'`. PD
   // geocodes the value server-side.
   if (role.company_address) body.address = { value: role.company_address };
+
+  const useRoleTypes = !!fields.org.roleTypes;
   const customFieldValues = {
     [fields.org.barbourCompanyId]: role.company_id != null ? String(role.company_id) : undefined,
-    [fields.org.barbourRole]: role.role_name,
     // PD custom phone fields take a plain string (NOT the {value,primary,label} array
     // shape used for built-in person phones).
     [fields.org.phone]: role.company_phone || undefined,
   };
+  if (useRoleTypes) {
+    // Multi-option field. Only write when caller resolved something (roleTypeIds
+    // will be an array on create or accumulated on update; null means no-op).
+    if (Array.isArray(roleTypeIds)) {
+      customFieldValues[fields.org.roleTypes] = roleTypeIds;
+    }
+  } else if (fields.org.barbourRole) {
+    // Legacy single-value text field. Overwritten each sync (last-write-wins);
+    // known caveat pre-dating the multi-option field.
+    customFieldValues[fields.org.barbourRole] = role.role_name;
+  }
   return { ...body, ...wrapForV2(customFieldValues) };
 }
 
@@ -93,8 +110,14 @@ async function enrichRoleWithAddress(role) {
 }
 
 export async function createOrg(role) {
+  let roleTypeIds; // undefined ⇒ don't write to the multi-option field
+  if (fields.org.roleTypes) {
+    const options = await getOrgRoleTypeOptions();
+    const id = resolveRoleOptionId(options, role.role_name);
+    if (id != null) roleTypeIds = [id];
+  }
   const res = await requestV2(
-    { method: 'POST', url: '/organizations', data: buildOrgBody(role) },
+    { method: 'POST', url: '/organizations', data: buildOrgBody(role, roleTypeIds) },
     { label: 'pd-createOrg' },
   );
   return res.data?.data;
@@ -126,6 +149,32 @@ async function hasExistingAddress(existingOrg) {
   }
 }
 
+// Read the existing multi-option roleTypes value off an org. Handles both the
+// v2 nested shape (`custom_fields.<hash> = [id, id]`) and the flat shape from
+// search responses. If the field wasn't included on the search result, one GET
+// refetches. Returns [] on any miss (safe default — we union anyway).
+async function readExistingRoleTypeIds(orgId, existingOrg) {
+  const key = fields.org.roleTypes;
+  if (!key) return [];
+  let val = readCustomField(existingOrg, key);
+  if (val == null && orgId) {
+    try {
+      const res = await requestV2(
+        { method: 'GET', url: `/organizations/${orgId}` },
+        { label: 'pd-orgReadRoleTypes' },
+      );
+      val = readCustomField(res.data?.data, key);
+    } catch {
+      return [];
+    }
+  }
+  if (Array.isArray(val)) return val.map(Number).filter((n) => !isNaN(n));
+  if (typeof val === 'string' && val.length > 0) {
+    return val.split(',').map((s) => Number(s.trim())).filter((n) => !isNaN(n));
+  }
+  return [];
+}
+
 export async function updateOrg(orgId, role, existingOrg = null) {
   // Protect manually-set addresses. If the org already has one (either the
   // client's team's entry or an earlier value we or they wrote), don't overwrite.
@@ -139,8 +188,23 @@ export async function updateOrg(orgId, role, existingOrg = null) {
       logger.debug(`[pd-org] preserving existing address on org ${orgId}`);
     }
   }
+
+  // Accumulate this role into the multi-option Barbour Role Types field.
+  // Undefined ⇒ don't touch the field on this PATCH (either it's not
+  // configured, or this role is already present, or the role is unknown).
+  let roleTypeIds;
+  if (fields.org.roleTypes) {
+    const options = await getOrgRoleTypeOptions();
+    const newId = resolveRoleOptionId(options, role.role_name);
+    if (newId != null) {
+      const existing = await readExistingRoleTypeIds(orgId, existingOrg);
+      const union = unionOptionIds(existing, newId);
+      if (union) roleTypeIds = union; // changed → write; null → already present, skip
+    }
+  }
+
   const res = await requestV2(
-    { method: 'PATCH', url: `/organizations/${orgId}`, data: buildOrgBody(roleForBody) },
+    { method: 'PATCH', url: `/organizations/${orgId}`, data: buildOrgBody(roleForBody, roleTypeIds) },
     { label: 'pd-updateOrg' },
   );
   return res.data?.data;

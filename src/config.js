@@ -38,10 +38,14 @@ export const config = {
       'Developer',
     ],
     // Two-axis primary role picks. Matched case-insensitive against role_name.
-    // If primary org role not found → falls back to primaryRolePreference order.
-    // If primary contact role not found → lead is created with org only, no person.
+    // Org  : exact match on primaryOrgRole → primaryRolePreference chain → first role.
+    // Contact: exact match on primaryContactRole → primaryContactRolePreference chain
+    //          → null (lead created with org only, no person). Within each match, roles
+    //          that actually have a Barbour person on them are preferred.
     primaryOrgRole: process.env.PRIMARY_ORG_ROLE || 'Main Contractor',
     primaryContactRole: process.env.PRIMARY_CONTACT_ROLE || 'Civil engineer',
+    primaryContactRolePreference:
+      parseRoles(process.env.PRIMARY_CONTACT_ROLE_PREFERENCE) || [],
     filterLookbackHours: parseInt(process.env.BARBOURABI_FILTER_LOOKBACK_HOURS || '24', 10),
     baseUrl: 'https://api.barbour-abi.com/v4',
     shellOrgName: process.env.BARBOURABI_SHELL_ORG_NAME || 'Barbour ABI – Awaiting role data',
@@ -83,24 +87,40 @@ export const config = {
       },
       org: {
         barbourCompanyId: process.env.PD_FIELD_ORG_BARBOUR_ID,
+        // Legacy single-value text field. Left readable for existing data; no longer
+        // written to when roleTypes (multi-option) is configured — see below.
         barbourRole: process.env.PD_FIELD_ORG_ROLE,
+        // Multi-option "Barbour Role Types" field on Organisation. Each option = one
+        // Barbour role_name. Populated additively across syncs (an org that's played
+        // Client on one project and Contractor on another shows both). Feature-flag:
+        // when this env var is blank, the code falls back to writing the legacy
+        // single-value `barbourRole` text field instead.
+        roleTypes: process.env.PD_FIELD_ORG_ROLE_TYPES,
         phone: process.env.PD_FIELD_ORG_PHONE,
       },
-      // Reportable per-role Org fields on the Lead/Deal. Key = exact Barbour role_name
-      // (case-insensitive match in processProject). Each holds ONE org id; additional
-      // orgs of the same role fall through to the associated-companies note.
-      // Insertion order = fixed slot mapping — Org 1..8 in PD sidebar.
-      // Only these 8 roles are pulled from Barbour (see barbourabi.rolesToSync default).
-      leadOrgByRole: {
-        Client: process.env.PD_FIELD_LEAD_ORG_CLIENT, // Org 1
-        'Civil engineer': process.env.PD_FIELD_LEAD_ORG_CIVIL, // Org 2
-        Contractor: process.env.PD_FIELD_LEAD_ORG_CONTRACTOR, // Org 3
-        Architect: process.env.PD_FIELD_LEAD_ORG_ARCHITECT, // Org 4
-        'Quantity surveyor': process.env.PD_FIELD_LEAD_ORG_QS, // Org 5
-        'Drainage subcontractor': process.env.PD_FIELD_LEAD_ORG_DRAINAGE, // Org 6
-        'Sustainability consultant': process.env.PD_FIELD_LEAD_ORG_SUSTAINABILITY, // Org 7
-        'Groundworks contractor': process.env.PD_FIELD_LEAD_ORG_GROUNDWORKS, // Org 8
-      },
+      // Ordered slot list for associated orgs on the Lead/Deal. Orgs pack into these
+      // slots 1..15 (primary org → slot 1, remaining orgs in BARBOURABI_ROLES config
+      // order → slots 2..15). Same-role duplicates each get their own slot until we
+      // run out. Overflow (>15 orgs) is silently dropped. Blank tail slots are fine.
+      // Only the roles listed in BARBOURABI_ROLES are pulled from Barbour in the first
+      // place, so most projects populate 1..8 and leave 9..15 blank.
+      leadOrgSlots: [
+        process.env.PD_FIELD_LEAD_ORG_CLIENT,
+        process.env.PD_FIELD_LEAD_ORG_CONTRACTOR,
+        process.env.PD_FIELD_LEAD_ORG_CIVIL,
+        process.env.PD_FIELD_LEAD_ORG_ARCHITECT,
+        process.env.PD_FIELD_LEAD_ORG_QS,
+        process.env.PD_FIELD_LEAD_ORG_STRUCTURAL,
+        process.env.PD_FIELD_LEAD_ORG_ME_CONSULTANT,
+        process.env.PD_FIELD_LEAD_ORG_PROJECT_MANAGER,
+        process.env.PD_FIELD_LEAD_ORG_DEVELOPER,
+        process.env.PD_FIELD_LEAD_ORG_TRANSPORT,
+        process.env.PD_FIELD_LEAD_ORG_AGENT,
+        process.env.PD_FIELD_LEAD_ORG_PLANNER,
+        process.env.PD_FIELD_LEAD_ORG_SUSTAINABILITY,
+        process.env.PD_FIELD_LEAD_ORG_GROUNDWORKS,
+        process.env.PD_FIELD_LEAD_ORG_DRAINAGE,
+      ].filter(Boolean),
       person: {
         barbourPersonId: process.env.PD_FIELD_PERSON_BARBOUR_ID,
       },
