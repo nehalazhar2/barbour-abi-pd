@@ -45,10 +45,21 @@ function buildLeadOrgSlotAssignments(roles, primaryRole, orgByBarbourCompanyId) 
   }
 
   const customFieldValues = {};
-  for (let i = 0; i < Math.min(ordered.length, slots.length); i += 1) {
+  const usedCount = Math.min(ordered.length, slots.length);
+  for (let i = 0; i < usedCount; i += 1) {
     const key = slots[i];
     const pdOrgId = orgByBarbourCompanyId[ordered[i].company_id];
     if (key && pdOrgId) customFieldValues[key] = pdOrgId;
+  }
+  // CLEAR unused tail slots so re-syncs wipe stale values from prior runs.
+  // Without this, if a Lead previously had 6 orgs (populating slots 1..6) and
+  // today has 4 (slots 1..4), slots 5..6 would keep their OLD org ids, showing
+  // as ghost entries in the sidebar. flattenForV1 drops undefined/null/'' — we
+  // need something that persists. Empty string is what PD accepts for "clear
+  // this org relation field" on custom-field writes.
+  for (let i = usedCount; i < slots.length; i += 1) {
+    const key = slots[i];
+    if (key) customFieldValues[key] = null;
   }
   if (ordered.length > slots.length) {
     logger.warn(

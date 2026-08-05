@@ -10,7 +10,11 @@ export function flattenForV1(fieldMap) {
     // Computed object keys from undefined env vars collapse to the literal string "undefined"
     // — guard against that and other empty keys.
     if (!key || key === 'undefined') continue;
-    if (value === undefined || value === null || value === '') continue;
+    // Only skip `undefined` — treat `null` and `""` as explicit clear-requests
+    // (PD needs SOMETHING in the body to unset a custom field on PATCH; omitting
+    // the key means "don't touch"). Slot-clearing in processProject relies on
+    // this so stale org ids from prior syncs get wiped on re-sync.
+    if (value === undefined) continue;
     out[key] = value;
   }
   return out;

@@ -106,24 +106,27 @@ export const config = {
       // slots 1..15 (primary org → slot 1, remaining orgs in BARBOURABI_ROLES config
       // order → slots 2..15). Same-role duplicates each get their own slot until we
       // run out. Overflow (>15 orgs) is silently dropped. Blank tail slots are fine.
-      // Only the roles listed in BARBOURABI_ROLES are pulled from Barbour in the first
-      // place, so most projects populate 1..8 and leave 9..15 blank.
+      //
+      // ORDER MUST MATCH the PD sidebar rendering order (sorted by dealField.order_nr).
+      // If Ben reorders the fields in PD, this array MUST be updated to match, or
+      // orgs will appear at unexpected sidebar positions and gaps will show.
+      // Confirmed 2026-08-05 by fetching /v1/dealFields and sorting by order_nr.
       leadOrgSlots: [
-        process.env.PD_FIELD_LEAD_ORG_CLIENT,
-        process.env.PD_FIELD_LEAD_ORG_CONTRACTOR,
-        process.env.PD_FIELD_LEAD_ORG_CIVIL,
-        process.env.PD_FIELD_LEAD_ORG_ARCHITECT,
-        process.env.PD_FIELD_LEAD_ORG_QS,
-        process.env.PD_FIELD_LEAD_ORG_STRUCTURAL,
-        process.env.PD_FIELD_LEAD_ORG_ME_CONSULTANT,
-        process.env.PD_FIELD_LEAD_ORG_PROJECT_MANAGER,
-        process.env.PD_FIELD_LEAD_ORG_DEVELOPER,
-        process.env.PD_FIELD_LEAD_ORG_TRANSPORT,
-        process.env.PD_FIELD_LEAD_ORG_AGENT,
-        process.env.PD_FIELD_LEAD_ORG_PLANNER,
-        process.env.PD_FIELD_LEAD_ORG_SUSTAINABILITY,
-        process.env.PD_FIELD_LEAD_ORG_GROUNDWORKS,
-        process.env.PD_FIELD_LEAD_ORG_DRAINAGE,
+        process.env.PD_FIELD_LEAD_ORG_CLIENT,          // sidebar Org 1  order_nr=35
+        process.env.PD_FIELD_LEAD_ORG_CIVIL,           // sidebar Org 2  order_nr=36
+        process.env.PD_FIELD_LEAD_ORG_CONTRACTOR,      // sidebar Org 3  order_nr=37
+        process.env.PD_FIELD_LEAD_ORG_ARCHITECT,       // sidebar Org 4  order_nr=38
+        process.env.PD_FIELD_LEAD_ORG_QS,              // sidebar Org 5  order_nr=39
+        process.env.PD_FIELD_LEAD_ORG_DRAINAGE,        // sidebar Org 6  order_nr=40
+        process.env.PD_FIELD_LEAD_ORG_SUSTAINABILITY,  // sidebar Org 7  order_nr=41
+        process.env.PD_FIELD_LEAD_ORG_GROUNDWORKS,     // sidebar Org 8  order_nr=42
+        process.env.PD_FIELD_LEAD_ORG_STRUCTURAL,      // sidebar Org 9  order_nr=43
+        process.env.PD_FIELD_LEAD_ORG_ME_CONSULTANT,   // sidebar Org 10 order_nr=44
+        process.env.PD_FIELD_LEAD_ORG_PROJECT_MANAGER, // sidebar Org 11 order_nr=45
+        process.env.PD_FIELD_LEAD_ORG_DEVELOPER,       // sidebar Org 12 order_nr=46
+        process.env.PD_FIELD_LEAD_ORG_TRANSPORT,       // sidebar Org 13 order_nr=47
+        process.env.PD_FIELD_LEAD_ORG_AGENT,           // sidebar Org 14 order_nr=48
+        process.env.PD_FIELD_LEAD_ORG_PLANNER,         // sidebar Org 15 order_nr=49
       ].filter(Boolean),
       person: {
         barbourPersonId: process.env.PD_FIELD_PERSON_BARBOUR_ID,
