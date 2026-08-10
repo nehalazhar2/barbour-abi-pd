@@ -28,6 +28,7 @@ const ROLE_FIELDS = [
   'person_first_name',
   'person_last_name',
   'person_email',
+  'person_job_title',
   'person_id',
   'role_name',
   'role_code',
@@ -54,6 +55,7 @@ function flatten(groupsByName) {
           last_name: p.person_last_name,
           email: p.person_email,
           phone: p.person_phone, // not always present
+          job_title: p.person_job_title,
         })),
       });
     }

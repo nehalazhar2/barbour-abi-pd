@@ -68,6 +68,7 @@ export function normalisePerson(raw) {
     last_name: raw.last_name ?? raw.person_last_name,
     email: raw.email ?? raw.person_email,
     phone: raw.phone ?? raw.person_mobile,
+    job_title: raw.job_title ?? raw.person_job_title,
   };
 }
 

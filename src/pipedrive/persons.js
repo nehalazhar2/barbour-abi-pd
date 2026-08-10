@@ -103,6 +103,7 @@ function buildPersonBody(person, orgId, { labelIds } = {}) {
   const body = { name: fullName(person) };
   if (person.email) body.emails = [{ value: person.email, primary: true, label: 'work' }];
   if (person.phone) body.phones = [{ value: person.phone, primary: true, label: 'work' }];
+  if (person.job_title) body.job_title = person.job_title;
   if (orgId) body.org_id = orgId;
   // PD v2 label_ids replaces on PATCH — caller passes the merged set (existing ∪ addLabelId).
   if (Array.isArray(labelIds) && labelIds.length > 0) body.label_ids = labelIds;
