@@ -100,10 +100,15 @@ function buildPersonBody(person, orgId, { labelIds } = {}) {
     // Stringify — Barbour IDs are numeric but the varchar custom field demands string.
     [fields.person.barbourPersonId]: person.person_id != null ? String(person.person_id) : undefined,
   };
+  // Custom "Barbour Job Title" text field on Person. We use a custom field rather
+  // than PD's built-in `job_title` because the built-in is a Contact Sync field —
+  // writes 403 unless Contact Sync is enabled on the account.
+  if (fields.person.barbourJobTitle && person.job_title) {
+    customFieldValues[fields.person.barbourJobTitle] = person.job_title;
+  }
   const body = { name: fullName(person) };
   if (person.email) body.emails = [{ value: person.email, primary: true, label: 'work' }];
   if (person.phone) body.phones = [{ value: person.phone, primary: true, label: 'work' }];
-  if (person.job_title) body.job_title = person.job_title;
   if (orgId) body.org_id = orgId;
   // PD v2 label_ids replaces on PATCH — caller passes the merged set (existing ∪ addLabelId).
   if (Array.isArray(labelIds) && labelIds.length > 0) body.label_ids = labelIds;

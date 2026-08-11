@@ -130,6 +130,11 @@ export const config = {
       ].filter(Boolean),
       person: {
         barbourPersonId: process.env.PD_FIELD_PERSON_BARBOUR_ID,
+        // Custom text field on PD Person that mirrors Barbour's `person_job_title`.
+        // We DO NOT write PD's built-in `job_title` because it's a Contact Sync
+        // field — writes 403 unless the account has Contact Sync enabled.
+        // Leave blank to skip the job-title write entirely.
+        barbourJobTitle: process.env.PD_FIELD_PERSON_BARBOUR_JOB_TITLE,
       },
     },
     // Person label applied to fallback contacts pulled from Barbour's
