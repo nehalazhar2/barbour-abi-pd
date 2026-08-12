@@ -16,12 +16,25 @@ async function getAllSavedSearches() {
   return cached;
 }
 
+// Normalise for name comparison: lowercase, collapse whitespace, and treat
+// Unicode dash variants (en-dash –, em-dash —, minus −,
+// non-breaking hyphen ‑, figure dash ‒) as ASCII hyphen. This
+// forgives copy-paste from rich-text sources (email, Word, chat) where the
+// name might contain typographic dashes even though Barbour stores an ASCII
+// hyphen (e.g. "Neoloy – not started" vs "Neoloy - not started").
+function normaliseSearchName(s) {
+  return (s || '')
+    .toLowerCase()
+    .replace(/[‐‑‒–—−]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export async function getSavedSearchByName(name) {
   if (!name) throw new Error('saved search name not configured');
   const searches = await getAllSavedSearches();
-  const match = searches.find(
-    (s) => (s?.saved_search_name || '').toLowerCase() === name.toLowerCase(),
-  );
+  const target = normaliseSearchName(name);
+  const match = searches.find((s) => normaliseSearchName(s?.saved_search_name) === target);
   if (!match) {
     throw new Error(`Saved search "${name}" not found in Barbour ABI account`);
   }
