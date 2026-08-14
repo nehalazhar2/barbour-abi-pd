@@ -1,6 +1,6 @@
 import { requestV2 } from './client.js';
 import { wrapForV2, fields, searchByCustomField, readCustomField } from './customFields.js';
-import { getCompany, formatCompanyAddress } from '../barbourabi/companies.js';
+import { getCompany, buildCompanyAddress } from '../barbourabi/companies.js';
 import { getOrgRoleTypeOptions, resolveRoleOptionId, unionOptionIds } from './orgFieldOptions.js';
 import { logger } from '../utils/logger.js';
 
@@ -72,10 +72,11 @@ function buildOrgBody(role, roleTypeIds) {
   // write company_phone into that. Barbour IDs are numeric — varchar custom fields
   // demand strings, so coerce.
   const body = { name: role.company_name };
-  // Address must be an object on v2 (`{ value: "..." }`) — sending a bare string
-  // yields `Validation failed: address: The value is not a valid 'array'`. PD
-  // geocodes the value server-side.
-  if (role.company_address) body.address = { value: role.company_address };
+  // Address is a structured object on v2 — `{ value, postal_code, locality, ... }`.
+  // Passing only `value` leaves the sidebar tiles (Zip/Postal Code, City) blank
+  // because PD's geocoder doesn't reliably fill them; we send the parts explicitly
+  // from the raw Barbour fields. buildCompanyAddress already returns this shape.
+  if (role.company_address) body.address = role.company_address;
 
   const useRoleTypes = !!fields.org.roleTypes;
   const customFieldValues = {
@@ -105,7 +106,7 @@ function buildOrgBody(role, roleTypeIds) {
 async function enrichRoleWithAddress(role) {
   if (!role?.company_id || role.company_address) return role;
   const company = await getCompany(role.company_id);
-  const address = formatCompanyAddress(company);
+  const address = buildCompanyAddress(company);
   return address ? { ...role, company_address: address } : role;
 }
 
@@ -135,18 +136,49 @@ function readAddressString(addr) {
   return '';
 }
 
-async function hasExistingAddress(existingOrg) {
-  if (!existingOrg) return false;
-  if ('address' in existingOrg) return readAddressString(existingOrg.address) !== '';
+function readAddressPostcode(addr) {
+  if (!addr || typeof addr !== 'object') return '';
+  return (addr.postal_code || '').trim();
+}
+
+function normaliseForCompare(s) {
+  return (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// Fetch the org's full address object (with structured sub-fields) if not
+// already on the passed-in record.
+async function fetchOrgAddress(existingOrg) {
+  if (!existingOrg) return null;
+  if ('address' in existingOrg && existingOrg.address && typeof existingOrg.address === 'object') {
+    return existingOrg.address;
+  }
   try {
     const res = await requestV2(
       { method: 'GET', url: `/organizations/${existingOrg.id}` },
       { label: 'pd-orgReadAddress' },
     );
-    return readAddressString(res.data?.data?.address) !== '';
+    return res.data?.data?.address ?? null;
   } catch {
-    return true; // failsafe — assume address exists so we don't clobber
+    return undefined; // signal "unknown" so caller preserves
   }
+}
+
+// Decide whether to overwrite the existing address with ours.
+//  - No existing address        → write ours.
+//  - Same display value, but the existing record is missing `postal_code`
+//    → safe re-issue with structured sub-fields (backfills postcode/city on
+//      orgs we created before this change).
+//  - Different display value    → preserve (respect manual edits by Ben's team).
+//  - Fetch failed / unknown     → preserve (failsafe).
+async function shouldOverwriteAddress(existingOrg, newAddress) {
+  const existing = await fetchOrgAddress(existingOrg);
+  if (existing === undefined) return false;
+  const existingValue = readAddressString(existing);
+  if (!existingValue) return true;
+  const sameDisplay =
+    normaliseForCompare(existingValue) === normaliseForCompare(newAddress?.value);
+  if (!sameDisplay) return false;
+  return !readAddressPostcode(existing) && !!newAddress?.postal_code;
 }
 
 // Read the existing multi-option roleTypes value off an org. Handles both the
@@ -176,13 +208,14 @@ async function readExistingRoleTypeIds(orgId, existingOrg) {
 }
 
 export async function updateOrg(orgId, role, existingOrg = null) {
-  // Protect manually-set addresses. If the org already has one (either the
-  // client's team's entry or an earlier value we or they wrote), don't overwrite.
-  // We only write address when the target field is empty.
+  // Address write policy: overwrite only when empty OR when the display value
+  // matches what we already have but the structured `postal_code` is missing
+  // (backfills postcode/city on orgs we created before structured addresses
+  // shipped). See shouldOverwriteAddress for the full rules.
   let roleForBody = role;
   if (role.company_address && existingOrg) {
-    const already = await hasExistingAddress(existingOrg);
-    if (already) {
+    const write = await shouldOverwriteAddress(existingOrg, role.company_address);
+    if (!write) {
       const { company_address: _drop, ...rest } = role;
       roleForBody = rest;
       logger.debug(`[pd-org] preserving existing address on org ${orgId}`);

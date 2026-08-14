@@ -72,18 +72,29 @@ export function normalisePerson(raw) {
   };
 }
 
-// Concatenate the sparse Barbour address fields into a PD-friendly single string.
-// PD's built-in `address` on organizations is a display string; PD geocodes it
-// server-side. Order matters — street, city, county, postcode reads naturally.
-export function formatCompanyAddress(company) {
+// Build a PD-shaped address OBJECT from the sparse Barbour company fields. PD
+// v2 accepts `{ value, postal_code, locality, admin_area_level_2, country }` and
+// the structured sub-fields drive the sidebar tiles (Zip / Postal Code, City,
+// State/County). Sending only `value` and relying on PD's server-side geocoder
+// leaves those tiles blank for UK addresses in practice — so we set the parts
+// explicitly from the raw Barbour fields we already have.
+//   company_address1 → street/line 1
+//   company_address3 → city (locality)
+//   company_address4 → county (admin_area_level_2)
+//   company_postcode → postcode
+// Barbour data is UK-only for this client, so country defaults to United Kingdom.
+export function buildCompanyAddress(company) {
   if (!company) return null;
-  const parts = [
-    company.company_address1,
-    company.company_address3,
-    company.company_address4,
-    company.company_postcode,
-  ]
-    .map((s) => (s || '').trim())
-    .filter(Boolean);
-  return parts.length ? parts.join(', ') : null;
+  const line1 = (company.company_address1 || '').trim();
+  const city = (company.company_address3 || '').trim();
+  const county = (company.company_address4 || '').trim();
+  const postcode = (company.company_postcode || '').trim();
+  const value = [line1, city, county, postcode].filter(Boolean).join(', ');
+  if (!value) return null;
+  const address = { value, country: 'United Kingdom' };
+  if (line1) address.route = line1;
+  if (city) address.locality = city;
+  if (county) address.admin_area_level_2 = county;
+  if (postcode) address.postal_code = postcode;
+  return address;
 }
