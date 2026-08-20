@@ -2,6 +2,7 @@ import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { getSavedSearchByName } from '../barbourabi/savedSearches.js';
 import { getProjectsByQuery } from '../barbourabi/projects.js';
+import { getTagIdByName, ensureTagOnProject } from '../barbourabi/tags.js';
 import { processProject } from './processProject.js';
 
 // Barbour ABI uses relative-day operators on date filters
@@ -39,6 +40,21 @@ export async function runFilterSync() {
     `[filterSync] starting — ${names.length} saved search(es) [${names.join(', ')}], lookback ${lookbackHours}h`,
   );
 
+  // Resolve the CRM tag id once. We apply this tag to every project we
+  // successfully process so refreshSync can pick them up on subsequent
+  // republishes — without the CRM tag, a filter-sourced project falls off the
+  // radar the moment it no longer matches its saved search (e.g. moves from
+  // "not started" to "on site"), leaving Pipedrive frozen at the import state.
+  const crmTagName = config.barbourabi.crmTagName;
+  let crmTagId = null;
+  try {
+    crmTagId = await getTagIdByName(crmTagName);
+  } catch (err) {
+    logger.warn(
+      `[filterSync] cannot resolve CRM tag "${crmTagName}" — projects won't be tagged and refreshSync won't see them: ${err.message}`,
+    );
+  }
+
   // Dedup across searches: a project appearing in two saved searches is processed once.
   const merged = new Map();
   for (const name of names) {
@@ -67,6 +83,19 @@ export async function runFilterSync() {
       const result = await processProject(project, { source: 'filter' });
       if (result.created) stats.created += 1;
       else stats.updated += 1;
+
+      // Tag on Barbour AFTER a successful process so refreshSync will keep the
+      // Lead in sync on future republishes. Idempotent — skipped silently when
+      // the CRM tag id couldn't be resolved (already warned above).
+      if (crmTagId) {
+        try {
+          await ensureTagOnProject(project.project_id, crmTagId);
+        } catch (err) {
+          logger.warn(
+            `[filterSync] processed project ${project.project_id} but failed to apply CRM tag: ${err.message}`,
+          );
+        }
+      }
     } catch (err) {
       stats.failed += 1;
       logger.error(

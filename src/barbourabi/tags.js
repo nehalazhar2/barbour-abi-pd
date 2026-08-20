@@ -73,3 +73,22 @@ export async function swapTag(projectId, fromTagId, toTagId) {
   await removeTagFromProject(projectId, fromTagId);
   await addTagToProject(projectId, toTagId);
 }
+
+// Idempotently ensure a tag is on a project. Reads current tags first so we
+// don't hammer POST /projects/{id}/tags with duplicates on every refresh —
+// filterSync/refreshSync can see the same project many days in a row.
+// Returns true if we added the tag, false if it was already present.
+export async function ensureTagOnProject(projectId, tagId) {
+  if (!projectId || !tagId) return false;
+  try {
+    const existing = await getProjectTags(projectId);
+    if (existing.some((t) => t.tag_id === tagId)) return false;
+    await addTagToProject(projectId, tagId);
+    return true;
+  } catch (err) {
+    logger.warn(
+      `[tags] ensureTagOnProject failed for project ${projectId} tag ${tagId}: ${err.message}`,
+    );
+    return false;
+  }
+}
