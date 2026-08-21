@@ -1,11 +1,11 @@
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { getRolesForProject } from '../barbourabi/roles.js';
-import { getSectorName } from '../barbourabi/lookups.js';
+import { getSectorName, resolveMaterialNames } from '../barbourabi/lookups.js';
 import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
 import { upsertOrg } from '../pipedrive/organisations.js';
 import { upsertPerson } from '../pipedrive/persons.js';
-import { upsertLead, clearIntegrationNotes } from '../pipedrive/leads.js';
+import { upsertLead, clearIntegrationNotes, addNoteToLead } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
 
 // Pack associated orgs into the ordered leadOrgSlots array. Primary org goes into
@@ -121,7 +121,7 @@ function pickPrimaryContactRole(roles, primaryName, preference = []) {
   return firstPersonlessMatch;
 }
 
-export async function processProject(project, { ownerId, source, preserveOwner = false, preserveLabels = false } = {}) {
+export async function processProject(project, { ownerId, source, preserveOwner = false, preserveLabels = false, matchedSearches = [] } = {}) {
   const projectId = project.project_id;
   const projectTitle = project.project_title || `Barbour project ${projectId}`;
   const projectValue = Number(project.project_value) || 0;
@@ -266,22 +266,63 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     ownerId,
     source,
     roleOrgFieldValues,
-    { preserveOwner, preserveLabels },
+    { preserveOwner, preserveLabels, matchedSearches },
   );
 
-  // Wipe any legacy "Associated companies" notes left over from the pre-slot design.
-  // We no longer add integration notes, so this is one-time cleanup on re-sync.
-  // User-authored notes are left untouched.
+  // Post-lead housekeeping — always wipe our own integration notes first (both
+  // legacy "Associated companies" and prior matched-materials notes), then
+  // rewrite the current materials note if the shortlist is configured and the
+  // project has matches. Idempotent across re-syncs.
   if (lead?.id && !usingShellOrg) {
     try {
       const cleared = await clearIntegrationNotes(lead.id);
-      if (cleared > 0) logger.debug(`[process] cleared ${cleared} legacy integration note(s) on lead ${lead.id}`);
+      if (cleared > 0) logger.debug(`[process] cleared ${cleared} integration note(s) on lead ${lead.id}`);
     } catch (err) {
       logger.warn(`[process] could not clear legacy notes on lead ${lead.id}: ${err.message}`);
     }
+    // Materials note is derived from Barbour data and regenerated every sync so
+    // it stays fresh (Ben's explicit ask: "Barbour info would be most recent").
+    await maybeWriteMaterialsNote(lead.id, project);
   }
 
   return { leadId: lead?.id, created, orgCount: Object.keys(orgByBarbourCompanyId).length };
+}
+
+// Intersect the project's Barbour material codes with the client's shortlist and
+// write a Note on the Lead listing the matched names. No-op when the shortlist
+// isn't configured or nothing matched — the empty case shouldn't create a
+// misleading "no matches" note.
+async function maybeWriteMaterialsNote(leadId, project) {
+  const shortlist = config.barbourabi.materialsShortlist || [];
+  if (shortlist.length === 0) return;
+  const projectCodes = Array.isArray(project.project_materials) ? project.project_materials : [];
+  if (projectCodes.length === 0) return;
+  const shortlistSet = new Set(shortlist.map((c) => c.toUpperCase()));
+  const matched = projectCodes.filter((c) => shortlistSet.has(String(c).toUpperCase()));
+  if (matched.length === 0) return;
+  const resolved = await resolveMaterialNames(matched);
+  // Drop any code we couldn't resolve (silently — lookups.material is stable so
+  // an unresolved code is more likely a stale entry in the shortlist than a
+  // real issue). Then dedup: RD01 and RD0202 both resolve to "Surfaces"-family
+  // names but the shortlist may include parent + child.
+  const seen = new Set();
+  const names = [];
+  for (const r of resolved) {
+    if (!r.name) continue;
+    if (seen.has(r.name)) continue;
+    seen.add(r.name);
+    names.push(r.name);
+  }
+  if (names.length === 0) return;
+  const body = 'Matched products:\n' + names.map((n) => `• ${n}`).join('\n');
+  try {
+    await addNoteToLead(leadId, body);
+    logger.info(
+      `[process] project ${project.project_id}: materials note written — ${names.length} match(es)`,
+    );
+  } catch (err) {
+    logger.warn(`[process] materials note write failed on lead ${leadId}: ${err.message}`);
+  }
 }
 
 // Test-only surface. Kept internal-looking so callers know these are unstable

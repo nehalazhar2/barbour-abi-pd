@@ -22,6 +22,10 @@ const PROJECT_FIELDS = [
   'project_start',
   'project_start_min',
   'project_primary_sector',
+  // Array of Barbour material codes (e.g. ["RD0202","SW0107",...]) — used by
+  // processProject to intersect with the client's product shortlist and write
+  // a matched-materials Note on the Lead.
+  'project_materials',
 ].join(',');
 
 async function paginate(buildParams, label) {

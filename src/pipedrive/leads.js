@@ -53,19 +53,43 @@ export async function findLeadByBarbourId(barbourProjectId) {
   return { lead: null, viaLegacy: false };
 }
 
-// Build PD lead label_ids for an integration lead. Every sync-created lead gets the
-// shared "Barbour ABI" label (broad source marker) plus one source-specific label
-// (Tag-Sync / Filter-Sync). Unset env vars are silently skipped.
-function labelIdsForSource(source) {
-  const { barbour, tagSync, filterSync } = config.pipedrive.leadLabels;
+// Normalise saved-search names the same way savedSearches.js does so map lookups
+// tolerate Unicode dashes and whitespace variations between env config and the
+// name Barbour returns.
+function normaliseSearchName(s) {
+  return (s || '')
+    .toLowerCase()
+    .replace(/[‐‑‒–—−]/g, '-')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Build PD lead label_ids for an integration lead. Every sync-created lead gets
+// the shared "Barbour ABI" label (broad source marker) plus one source-specific
+// label (Tag-Sync / Filter-Sync). For filter-sourced leads, also add one label
+// per matched saved-search name (segmentation — Wrekin vs Geoworks) when a
+// mapping is configured. Unset env vars are silently skipped.
+function labelIdsForSource(source, matchedSearches = []) {
+  const { barbour, tagSync, filterSync, searchMap } = config.pipedrive.leadLabels;
   const ids = [];
   if (barbour) ids.push(barbour);
   if (source === 'tag' && tagSync) ids.push(tagSync);
   if (source === 'filter' && filterSync) ids.push(filterSync);
+  if (source === 'filter' && searchMap && matchedSearches.length > 0) {
+    // Build a normalised copy of searchMap once per call so the lookup tolerates
+    // dash/whitespace variants between the env-configured key and the incoming
+    // matched-search name.
+    const normMap = {};
+    for (const k of Object.keys(searchMap)) normMap[normaliseSearchName(k)] = searchMap[k];
+    for (const name of matchedSearches) {
+      const id = normMap[normaliseSearchName(name)];
+      if (id != null && !ids.includes(id)) ids.push(id);
+    }
+  }
   return ids;
 }
 
-function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields) {
+function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches = []) {
   // project_start_min (ISO) is preferred for PD Date fields. If it's missing we fall
   // back to project_start (human text like "third quarter 2027") — that only works if
   // PD_FIELD_LEAD_START_DATE is a Text field. Date fields will reject the text fallback.
@@ -104,13 +128,13 @@ function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, ge
   if (ironworkValue) body.value = { amount: ironworkValue, currency: 'GBP' };
   const resolvedOwner = ownerId ?? config.pipedrive.defaultOwnerId ?? config.pipedrive.ownerId;
   if (resolvedOwner) body.owner_id = Number(resolvedOwner);
-  const labelIds = labelIdsForSource(source);
+  const labelIds = labelIdsForSource(source, matchedSearches);
   if (labelIds.length) body.label_ids = labelIds;
   return body;
 }
 
-export async function createLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields) {
-  const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields);
+export async function createLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches = []) {
+  const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches);
   // Pipedrive requires at least one of person_id or organization_id on Lead create.
   if (!body.organization_id && !body.person_id) {
     throw new Error(
@@ -124,8 +148,8 @@ export async function createLead(project, primaryOrgId, primaryPersonId, ironwor
   return res.data?.data;
 }
 
-export async function updateLead(leadId, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false } = {}) {
-  const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields);
+export async function updateLead(leadId, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [] } = {}) {
+  const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches);
   // For legacy-adopted leads: the client's team already triaged them and set an
   // owner manually. Don't overwrite that.
   if (preserveOwner) delete body.owner_id;
@@ -140,7 +164,7 @@ export async function updateLead(leadId, project, primaryOrgId, primaryPersonId,
   return res.data?.data;
 }
 
-export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false } = {}) {
+export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [] } = {}) {
   const { lead: existing, viaLegacy } = await findLeadByBarbourId(project.project_id);
   if (existing?.id) {
     logger.debug(`[pd-lead] updating lead ${existing.id} (${project.project_title})${viaLegacy ? ' [adopted]' : ''}`);
@@ -148,7 +172,7 @@ export async function upsertLead(project, primaryOrgId, primaryPersonId, ironwor
       lead: await updateLead(
         existing.id, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields,
         // Legacy-adoption path forces preserveOwner; caller flags are merged on top.
-        { preserveOwner: viaLegacy || preserveOwner, preserveLabels },
+        { preserveOwner: viaLegacy || preserveOwner, preserveLabels, matchedSearches },
       ),
       created: false,
       adopted: viaLegacy,
@@ -156,7 +180,7 @@ export async function upsertLead(project, primaryOrgId, primaryPersonId, ironwor
   }
   logger.debug(`[pd-lead] creating lead (${project.project_title})`);
   return {
-    lead: await createLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields),
+    lead: await createLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches),
     created: true,
     adopted: false,
   };

@@ -55,13 +55,22 @@ export async function runFilterSync() {
     );
   }
 
-  // Dedup across searches: a project appearing in two saved searches is processed once.
-  const merged = new Map();
+  // Dedup across searches: a project appearing in two saved searches is
+  // processed once, but we track EVERY search that matched so per-search PD
+  // labels (segmentation) still get applied.
+  const merged = new Map(); // project_id → project
+  const searchesByProject = new Map(); // project_id → [searchName, ...]
   for (const name of names) {
     try {
       const projects = await fetchProjectsForSavedSearch(name, lookbackHours);
       logger.info(`[filterSync] "${name}" matched ${projects.length} project(s)`);
-      for (const p of projects) if (p?.project_id != null) merged.set(p.project_id, p);
+      for (const p of projects) {
+        if (p?.project_id == null) continue;
+        merged.set(p.project_id, p);
+        const list = searchesByProject.get(p.project_id) || [];
+        if (!list.includes(name)) list.push(name);
+        searchesByProject.set(p.project_id, list);
+      }
     } catch (err) {
       stats.searchesFailed += 1;
       logger.error(`[filterSync] saved search "${name}" failed: ${err.message}`);
@@ -80,7 +89,8 @@ export async function runFilterSync() {
 
   for (const project of projects) {
     try {
-      const result = await processProject(project, { source: 'filter' });
+      const matchedSearches = searchesByProject.get(project.project_id) || [];
+      const result = await processProject(project, { source: 'filter', matchedSearches });
       if (result.created) stats.created += 1;
       else stats.updated += 1;
 

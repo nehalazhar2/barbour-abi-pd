@@ -56,6 +56,16 @@ export const config = {
     // Sentinel barbour_company_id used to dedup the shared placeholder org for shell leads.
     // Real Barbour company IDs are positive ints, so 0 is safe.
     shellCompanyId: process.env.BARBOURABI_SHELL_COMPANY_ID || '0',
+    // Wrekin's shortlist of Barbour material codes worth surfacing on the Lead
+    // (Ben's product-to-material mapping). Comma-separated; e.g.
+    //   BARBOURABI_MATERIALS_SHORTLIST=RD01,RD0202,SW0107,SW0151,...
+    // When set, each processed project's project_materials is intersected with
+    // this list and the matched names are written as a Note on the Lead. Leave
+    // blank to disable the materials-note feature entirely.
+    materialsShortlist: (process.env.BARBOURABI_MATERIALS_SHORTLIST || '')
+      .split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean),
   },
   pipedrive: {
     apiToken: process.env.PIPEDRIVE_API_TOKEN,
@@ -68,6 +78,25 @@ export const config = {
       barbour: process.env.PD_LABEL_LEAD_BARBOUR,
       tagSync: process.env.PD_LABEL_LEAD_TAG_SYNC,
       filterSync: process.env.PD_LABEL_LEAD_FILTER_SYNC,
+      // Per-search PD labels used to segment filter-sourced leads by which saved
+      // search matched. JSON map keyed by NORMALISED search name (lowercase,
+      // whitespace collapsed, Unicode dashes → ASCII hyphen — the same
+      // normalisation savedSearches.normaliseSearchName applies). Value = PD
+      // label id (int or string). Example:
+      //   PD_LABEL_LEAD_SEARCH_MAP={"wrekin - complete - north":"42","geoworks - complete - north":"43"}
+      // Leave blank to skip per-search labelling entirely.
+      searchMap: (() => {
+        const raw = process.env.PD_LABEL_LEAD_SEARCH_MAP;
+        if (!raw) return {};
+        try {
+          return JSON.parse(raw);
+        } catch (err) {
+          console.warn(
+            `[config] PD_LABEL_LEAD_SEARCH_MAP failed to parse as JSON — ignoring: ${err.message}`,
+          );
+          return {};
+        }
+      })(),
     },
     // Public-facing PD URL (used in note hyperlinks to org / person pages).
     appBaseUrl: process.env.PIPEDRIVE_APP_BASE_URL,
