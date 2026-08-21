@@ -78,21 +78,28 @@ export function normalisePerson(raw) {
 // State/County). Sending only `value` and relying on PD's server-side geocoder
 // leaves those tiles blank for UK addresses in practice — so we set the parts
 // explicitly from the raw Barbour fields we already have.
-//   company_address1 → street/line 1
+//   company_address1 → floor / building
+//   company_address2 → street  (often the actual line-1 street; NOT always empty
+//                                — e.g. Aecom LS11 9AR has "2 City Walk" here)
 //   company_address3 → city (locality)
 //   company_address4 → county (admin_area_level_2)
 //   company_postcode → postcode
 // Barbour data is UK-only for this client, so country defaults to United Kingdom.
+// PD's `route` sub-field only takes one string; when both address1 and address2
+// are present, we concatenate them into route so both show up in the sidebar's
+// street field. The display `value` includes everything, comma-separated.
 export function buildCompanyAddress(company) {
   if (!company) return null;
   const line1 = (company.company_address1 || '').trim();
+  const line2 = (company.company_address2 || '').trim();
   const city = (company.company_address3 || '').trim();
   const county = (company.company_address4 || '').trim();
   const postcode = (company.company_postcode || '').trim();
-  const value = [line1, city, county, postcode].filter(Boolean).join(', ');
+  const value = [line1, line2, city, county, postcode].filter(Boolean).join(', ');
   if (!value) return null;
+  const route = [line1, line2].filter(Boolean).join(', ');
   const address = { value, country: 'United Kingdom' };
-  if (line1) address.route = line1;
+  if (route) address.route = route;
   if (city) address.locality = city;
   if (county) address.admin_area_level_2 = county;
   if (postcode) address.postal_code = postcode;

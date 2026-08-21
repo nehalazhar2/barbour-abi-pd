@@ -165,20 +165,31 @@ async function fetchOrgAddress(existingOrg) {
 
 // Decide whether to overwrite the existing address with ours.
 //  - No existing address        → write ours.
-//  - Same display value, but the existing record is missing `postal_code`
-//    → safe re-issue with structured sub-fields (backfills postcode/city on
-//      orgs we created before this change).
-//  - Different display value    → preserve (respect manual edits by Ben's team).
+//  - Same postcode              → same physical location, we're just filling in
+//                                 more detail (e.g. we now include address2 as
+//                                 the street) → write ours.
+//  - Same display value but no postcode on existing → backfill structured
+//                                 sub-fields (postcode / city / route).
+//  - Different postcode         → preserve (looks like a genuine manual edit
+//                                 to a different location).
 //  - Fetch failed / unknown     → preserve (failsafe).
 async function shouldOverwriteAddress(existingOrg, newAddress) {
   const existing = await fetchOrgAddress(existingOrg);
   if (existing === undefined) return false;
   const existingValue = readAddressString(existing);
   if (!existingValue) return true;
+  const existingPc = readAddressPostcode(existing);
+  const newPc = (newAddress?.postal_code || '').trim();
+  if (existingPc && newPc) {
+    return normaliseForCompare(existingPc) === normaliseForCompare(newPc);
+  }
   const sameDisplay =
     normaliseForCompare(existingValue) === normaliseForCompare(newAddress?.value);
-  if (!sameDisplay) return false;
-  return !readAddressPostcode(existing) && !!newAddress?.postal_code;
+  if (sameDisplay) return true;
+  // Existing has no postcode AND display differs — this is the pre-fix state,
+  // where we wrote a plain string that PD stored but didn't geocode. Overwrite
+  // to backfill structured sub-fields.
+  return !existingPc && !!newPc;
 }
 
 // Read the existing multi-option roleTypes value off an org. Handles both the
