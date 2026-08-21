@@ -79,23 +79,42 @@ export const config = {
       tagSync: process.env.PD_LABEL_LEAD_TAG_SYNC,
       filterSync: process.env.PD_LABEL_LEAD_FILTER_SYNC,
       // Per-search PD labels used to segment filter-sourced leads by which saved
-      // search matched. JSON map keyed by NORMALISED search name (lowercase,
-      // whitespace collapsed, Unicode dashes → ASCII hyphen — the same
-      // normalisation savedSearches.normaliseSearchName applies). Value = PD
-      // label id (int or string). Example:
-      //   PD_LABEL_LEAD_SEARCH_MAP={"wrekin - complete - north":"42","geoworks - complete - north":"43"}
-      // Leave blank to skip per-search labelling entirely.
+      // search matched. Format: "SearchName=labelId;SearchName=labelId".
+      //   - `;` separates entries.
+      //   - The FIRST `=` in each entry separates search name (left) from label
+      //     id (right); this lets search names contain `=` if ever needed
+      //     (they don't today).
+      // Example (paste directly into DO env vars, no JSON, no quotes needed):
+      //   PD_LABEL_LEAD_SEARCH_MAP=Wrekin - complete - North=b83a...;Geoworks - complete - North=b8a4...
+      // Search-name lookup at read-time normalises dash / whitespace variants
+      // (see labelIdsForSource in leads.js). Leave blank to skip per-search
+      // labelling entirely.
       searchMap: (() => {
         const raw = process.env.PD_LABEL_LEAD_SEARCH_MAP;
         if (!raw) return {};
-        try {
-          return JSON.parse(raw);
-        } catch (err) {
-          console.warn(
-            `[config] PD_LABEL_LEAD_SEARCH_MAP failed to parse as JSON — ignoring: ${err.message}`,
-          );
-          return {};
+        // Back-compat: if the value starts with `{` it's the old JSON format —
+        // still accept it.
+        if (raw.trim().startsWith('{')) {
+          try {
+            return JSON.parse(raw);
+          } catch (err) {
+            console.warn(
+              `[config] PD_LABEL_LEAD_SEARCH_MAP looks like JSON but failed to parse — ignoring: ${err.message}`,
+            );
+            return {};
+          }
         }
+        const map = {};
+        for (const entry of raw.split(';')) {
+          const trimmed = entry.trim();
+          if (!trimmed) continue;
+          const eq = trimmed.indexOf('=');
+          if (eq === -1) continue;
+          const name = trimmed.slice(0, eq).trim();
+          const id = trimmed.slice(eq + 1).trim();
+          if (name && id) map[name] = id;
+        }
+        return map;
       })(),
     },
     // Public-facing PD URL (used in note hyperlinks to org / person pages).
