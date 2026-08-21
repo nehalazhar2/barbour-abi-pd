@@ -21,6 +21,10 @@ const PROJECT_FIELDS = [
   'project_status',
   'project_start',
   'project_start_min',
+  // End-date pair mirrors start. Barbour uses `_min` for start bound and
+  // `_max` for finish bound (asymmetric, but that's the API).
+  'project_finish',
+  'project_finish_max',
   'project_primary_sector',
   // Array of Barbour material codes (e.g. ["RD0202","SW0107",...]) — used by
   // processProject to intersect with the client's product shortlist and write

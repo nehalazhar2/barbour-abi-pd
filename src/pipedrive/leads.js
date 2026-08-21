@@ -94,6 +94,10 @@ function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, ge
   // back to project_start (human text like "third quarter 2027") — that only works if
   // PD_FIELD_LEAD_START_DATE is a Text field. Date fields will reject the text fallback.
   const startDateValue = toDateOnly(project.project_start_min) || project.project_start;
+  // End-date pair mirrors start. project_finish_max (ISO, late bound) preferred;
+  // falls back to project_finish (text like "first quarter 2028") when absent.
+  // Same Date-vs-Text field-type caveat applies to PD_FIELD_LEAD_END_DATE.
+  const endDateValue = toDateOnly(project.project_finish_max) || project.project_finish;
   // PD v1 monetary custom fields require TWO sibling keys: `{hash}` for the amount
   // (bare number) and `{hash}_currency` for the currency code. Sending just the
   // amount triggers "Expected monetary field to include valid attribute 'currency'".
@@ -111,6 +115,7 @@ function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, ge
     [fields.lead.town]: project.project_site3,
     [fields.lead.status]: project.project_status,
     [fields.lead.startDate]: startDateValue,
+    [fields.lead.endDate]: endDateValue,
     [fields.lead.sector]: project.project_primary_sector_name,
     ...monetaryPair(fields.lead.ironworkValue, ironworkValue),
     ...monetaryPair(fields.lead.geoworksValue, geoworksValue),

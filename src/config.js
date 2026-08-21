@@ -116,6 +116,12 @@ export const config = {
         town: process.env.PD_FIELD_LEAD_TOWN,
         status: process.env.PD_FIELD_LEAD_STATUS,
         startDate: process.env.PD_FIELD_LEAD_START_DATE,
+        // Barbour project_finish_max (ISO) is preferred for a PD Date field;
+        // falls back to project_finish (text like "first quarter 2028") when
+        // the ISO isn't populated, so the PD field type must accept text if
+        // you want the fallback. Leave blank until the client's team creates
+        // the "Barbour End Date" custom field and provides the hash.
+        endDate: process.env.PD_FIELD_LEAD_END_DATE,
         sector: process.env.PD_FIELD_LEAD_SECTOR,
       },
       org: {
