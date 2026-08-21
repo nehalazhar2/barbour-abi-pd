@@ -314,7 +314,9 @@ async function maybeWriteMaterialsNote(leadId, project) {
     names.push(r.name);
   }
   if (names.length === 0) return;
-  const body = 'Matched products:\n' + names.map((n) => `• ${n}`).join('\n');
+  // PD notes support HTML but normalise plain-text `\n` to spaces when
+  // rendered, so bullets need explicit <br> to land on separate lines.
+  const body = 'Matched products:<br>' + names.map((n) => `• ${n}`).join('<br>');
   try {
     await addNoteToLead(leadId, body);
     logger.info(

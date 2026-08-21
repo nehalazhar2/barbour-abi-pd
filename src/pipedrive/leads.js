@@ -191,22 +191,33 @@ export async function upsertLead(project, primaryOrgId, primaryPersonId, ironwor
   };
 }
 
-// Invisible marker appended to every integration-generated note. Lets us identify
-// and clear our notes on subsequent syncs without touching user-authored notes.
-// HTML comments survive PD's note renderer and aren't displayed in the UI.
-const INTEGRATION_NOTE_MARKER = '<!-- barbour-abi-sync -->';
+// Visible-but-low-key marker appended to every integration-generated note. PD's
+// note sanitiser strips HTML comments (learned the hard way — the previous
+// "<!-- barbour-abi-sync -->" marker disappeared silently), so we use an
+// italic tag containing a distinctive phrase. Renders as small greyish text
+// at the bottom of the note in the PD UI.
+const INTEGRATION_NOTE_MARKER = '<i>— Barbour ABI sync</i>';
+// Substring we check when identifying our notes on the next pass — the plain
+// phrase without the tag survives even if PD ever changes how it renders <i>.
+const INTEGRATION_NOTE_MARKER_TEXT = 'Barbour ABI sync';
 
 export async function addNoteToLead(leadId, content) {
   return requestV1(
-    { method: 'POST', url: '/notes', data: { lead_id: leadId, content: `${content}\n${INTEGRATION_NOTE_MARKER}` } },
+    { method: 'POST', url: '/notes', data: { lead_id: leadId, content: `${content}<br>${INTEGRATION_NOTE_MARKER}` } },
     { label: 'pd-addNote' },
   );
 }
 
 // Delete all integration-owned notes on a lead so the next add pass produces a
-// clean, current set (no duplicates from prior syncs). Matches by marker OR by
-// legacy "Associated company:" prefix (covers notes created before the marker
-// was introduced). User-authored notes are left alone.
+// clean, current set (no duplicates from prior syncs). Matches by:
+//   - current visible marker text ("Barbour ABI sync")
+//   - legacy HTML-comment marker (pre PD-sanitisation discovery, may still
+//     exist on some notes if they somehow survived — belt & braces)
+//   - "Matched products:" prefix (safety net for notes written today between
+//     the feature landing and the marker fix — no realistic risk of matching
+//     a manual note)
+//   - legacy "Associated company:" prefix (pre-slot-design leftovers)
+// User-authored notes are left alone.
 export async function clearIntegrationNotes(leadId) {
   const res = await requestV1(
     { method: 'GET', url: '/notes', params: { lead_id: leadId, limit: 500 } },
@@ -215,7 +226,12 @@ export async function clearIntegrationNotes(leadId) {
   const all = res.data?.data || [];
   const ours = all.filter((n) => {
     const c = n.content || '';
-    return c.includes(INTEGRATION_NOTE_MARKER) || c.includes('Associated company:');
+    return (
+      c.includes(INTEGRATION_NOTE_MARKER_TEXT) ||
+      c.includes('<!-- barbour-abi-sync -->') ||
+      c.startsWith('Matched products:') ||
+      c.includes('Associated company:')
+    );
   });
   for (const n of ours) {
     await requestV1(
