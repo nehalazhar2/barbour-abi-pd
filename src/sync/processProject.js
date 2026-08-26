@@ -126,8 +126,39 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   const projectTitle = project.project_title || `Barbour project ${projectId}`;
   const projectValue = Number(project.project_value) || 0;
 
-  const ironworkValue = +(projectValue * config.products.ironwork).toFixed(2);
-  const geoworksValue = +(projectValue * config.products.geoworks).toFixed(2);
+  // Bucket the value into Ironworks / Geoworks based on which materials the
+  // project carries. When either bucket's material list is empty (env var not
+  // set), that bucket falls back to the legacy always-on multiplier so an
+  // unconfigured deployment keeps its old behaviour. When a bucket's list IS
+  // set, the value is only populated if the project's `project_materials`
+  // resolve to at least one name in that list; overlap items populate both.
+  const ironworkNames = config.products.ironworkMaterials;
+  const geoworksNames = config.products.geoworksMaterials;
+  const rawCodes = Array.isArray(project.project_materials) ? project.project_materials : [];
+  let hasIronworkMatch = ironworkNames.length === 0; // legacy: always true when list unset
+  let hasGeoworksMatch = geoworksNames.length === 0;
+  if (rawCodes.length > 0 && (ironworkNames.length > 0 || geoworksNames.length > 0)) {
+    const resolved = await resolveMaterialNames(rawCodes);
+    const projectNameSet = new Set(
+      resolved.map((r) => (r.name || '').toLowerCase()).filter(Boolean),
+    );
+    if (ironworkNames.length > 0) {
+      hasIronworkMatch = ironworkNames.some((n) => projectNameSet.has(n));
+    }
+    if (geoworksNames.length > 0) {
+      hasGeoworksMatch = geoworksNames.some((n) => projectNameSet.has(n));
+    }
+  } else if (rawCodes.length === 0) {
+    // No project materials at all: nothing to match against.
+    if (ironworkNames.length > 0) hasIronworkMatch = false;
+    if (geoworksNames.length > 0) hasGeoworksMatch = false;
+  }
+  const ironworkValue = hasIronworkMatch
+    ? +(projectValue * config.products.ironwork).toFixed(2)
+    : 0;
+  const geoworksValue = hasGeoworksMatch
+    ? +(projectValue * config.products.geoworks).toFixed(2)
+    : 0;
 
   // Resolve sector code → text once per project. Mutates `project` so leads.js can read
   // it via the existing buildLeadBody projection without taking another argument.

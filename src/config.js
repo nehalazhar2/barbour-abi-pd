@@ -131,6 +131,11 @@ export const config = {
         geoworksValue: process.env.PD_FIELD_LEAD_GEOWORKS,
         barbourProjectValue: process.env.PD_FIELD_LEAD_BARBOUR_VALUE,
         barbourUrl: process.env.PD_FIELD_LEAD_BARBOUR_URL,
+        // Text custom field on Lead holding the Barbour saved-search title(s)
+        // that matched this project (filter-sourced leads only). When set, the
+        // per-search PD label logic in labelIdsForSource is bypassed — the field
+        // replaces the labels. Multiple matches joined with "; ".
+        barbourSearch: process.env.PD_FIELD_LEAD_BARBOUR_SEARCH,
         postcode: process.env.PD_FIELD_LEAD_POSTCODE,
         town: process.env.PD_FIELD_LEAD_TOWN,
         status: process.env.PD_FIELD_LEAD_STATUS,
@@ -215,8 +220,24 @@ export const config = {
         .filter(Boolean),
   },
   products: {
-    ironwork: parseFloat(process.env.PRODUCT_PCT_IRONWORK || '0.00004'),
-    geoworks: parseFloat(process.env.PRODUCT_PCT_GEOWORKS || '0'),
+    ironwork: parseFloat(process.env.PRODUCT_PCT_IRONWORK || '0.004'),
+    geoworks: parseFloat(process.env.PRODUCT_PCT_GEOWORKS || '0.004'),
+    // Barbour material NAMES (case-insensitive; comma-separated) that flag a
+    // project as relevant to the Ironworks / Geoworks buckets. Names are matched
+    // against the resolved descriptions of `project_materials` codes (via the
+    // /lookups material tree). When BOTH lists are unset, values are computed
+    // for every project (legacy behaviour). When either list is set, the
+    // corresponding value is only written when the project's materials
+    // intersect that list — otherwise the value is 0. Overlap between the two
+    // lists is fine: a matching product populates both.
+    ironworkMaterials: (process.env.IRONWORKS_MATERIALS || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+    geoworksMaterials: (process.env.GEOWORKS_MATERIALS || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
   },
   alerts: {
     email: process.env.ALERT_EMAIL,

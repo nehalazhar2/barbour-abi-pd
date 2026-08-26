@@ -68,14 +68,23 @@ function normaliseSearchName(s) {
 // the shared "Barbour ABI" label (broad source marker) plus one source-specific
 // label (Tag-Sync / Filter-Sync). For filter-sourced leads, also add one label
 // per matched saved-search name (segmentation — Wrekin vs Geoworks) when a
-// mapping is configured. Unset env vars are silently skipped.
+// mapping is configured AND the newer `Barbour Search` text field is NOT
+// configured. When that field IS set, the per-search labels are suppressed —
+// the field replaces them so PD isn't cluttered with duplicate signal. Unset
+// env vars are silently skipped.
 function labelIdsForSource(source, matchedSearches = []) {
   const { barbour, tagSync, filterSync, searchMap } = config.pipedrive.leadLabels;
   const ids = [];
   if (barbour) ids.push(barbour);
   if (source === 'tag' && tagSync) ids.push(tagSync);
   if (source === 'filter' && filterSync) ids.push(filterSync);
-  if (source === 'filter' && searchMap && matchedSearches.length > 0) {
+  const barbourSearchFieldConfigured = !!fields.lead.barbourSearch;
+  if (
+    !barbourSearchFieldConfigured &&
+    source === 'filter' &&
+    searchMap &&
+    matchedSearches.length > 0
+  ) {
     // Build a normalised copy of searchMap once per call so the lookup tolerates
     // dash/whitespace variants between the env-configured key and the incoming
     // matched-search name.
@@ -101,11 +110,31 @@ function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, ge
   // PD v1 monetary custom fields require TWO sibling keys: `{hash}` for the amount
   // (bare number) and `{hash}_currency` for the currency code. Sending just the
   // amount triggers "Expected monetary field to include valid attribute 'currency'".
-  // Send {} for the pair when value is missing/zero so the field stays blank.
-  const monetaryPair = (key, n) => {
-    if (!key || n == null || isNaN(n) || n === 0) return {};
+  //
+  // Default: skip the pair when value is missing/zero so the field stays at whatever
+  // it currently holds on PD (relevant for barbourProjectValue — never want to
+  // overwrite a real value with 0 just because Barbour temporarily returned nothing).
+  //
+  // clearWhenZero: send `{key: null}` so the field is EXPLICITLY blanked on PD. Use
+  // this for the ironworks/geoworks buckets — when the project's materials stop
+  // matching a bucket, we need the corresponding value on PD to go blank rather
+  // than sticking at the stale figure from a previous sync.
+  const monetaryPair = (key, n, { clearWhenZero = false } = {}) => {
+    if (!key) return {};
+    if (n == null || isNaN(n) || n === 0) {
+      // PD rejects a null amount without a null currency as "Value or currency not set" —
+      // the pair has to be cleared together.
+      return clearWhenZero ? { [key]: null, [key + '_currency']: null } : {};
+    }
     return { [key]: n, [key + '_currency']: 'GBP' };
   };
+  // Barbour Search field: joined saved-search names on filter-sourced leads.
+  // Skipped entirely when matchedSearches is empty so refreshSync and tagSync
+  // don't clobber a value populated by an earlier filter pass.
+  const barbourSearchValue =
+    fields.lead.barbourSearch && matchedSearches.length > 0
+      ? matchedSearches.join('; ')
+      : undefined;
   const customFieldValues = flattenForV1({
     // Stringify — Barbour IDs are numeric but the varchar custom field demands string.
     [fields.lead.barbourProjectId]: project.project_id != null ? String(project.project_id) : undefined,
@@ -117,8 +146,9 @@ function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, ge
     [fields.lead.startDate]: startDateValue,
     [fields.lead.endDate]: endDateValue,
     [fields.lead.sector]: project.project_primary_sector_name,
-    ...monetaryPair(fields.lead.ironworkValue, ironworkValue),
-    ...monetaryPair(fields.lead.geoworksValue, geoworksValue),
+    [fields.lead.barbourSearch]: barbourSearchValue,
+    ...monetaryPair(fields.lead.ironworkValue, ironworkValue, { clearWhenZero: true }),
+    ...monetaryPair(fields.lead.geoworksValue, geoworksValue, { clearWhenZero: true }),
     ...monetaryPair(fields.lead.barbourProjectValue, Number(project.project_value) || 0),
     ...(extraCustomFields || {}),
   });
