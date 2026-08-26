@@ -3,7 +3,7 @@ import { logger } from '../utils/logger.js';
 import { getRolesForProject } from '../barbourabi/roles.js';
 import { getSectorName, resolveMaterialNames } from '../barbourabi/lookups.js';
 import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
-import { upsertOrg } from '../pipedrive/organisations.js';
+import { upsertOrg, updateOrg } from '../pipedrive/organisations.js';
 import { upsertPerson } from '../pipedrive/persons.js';
 import { upsertLead, clearIntegrationNotes, addNoteToLead } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
@@ -156,7 +156,13 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   const personByBarbourCompanyId = {};
   for (const role of roles) {
     try {
-      const org = await upsertOrg(role);
+      // Same-project multi-role dedup: if we already resolved a PD org for this
+      // Barbour company id earlier in the loop (e.g. same company appears as
+      // both Consulting Engineer and Structural Engineer), reuse that id and
+      // update directly. Calling upsertOrg a second time would re-run itemSearch,
+      // which lags fresh creates by seconds → search misses → we'd create a dupe.
+      const knownOrgId = orgByBarbourCompanyId[role.company_id];
+      const org = knownOrgId ? await updateOrg(knownOrgId, role) : await upsertOrg(role);
       if (org?.id) orgByBarbourCompanyId[role.company_id] = org.id;
       for (const person of role.persons || []) {
         try {
