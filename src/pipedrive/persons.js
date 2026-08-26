@@ -134,7 +134,7 @@ export async function updatePerson(personId, person, orgId, opts = {}) {
 // Merge an addLabelId (single option id) with an existing person's label_ids to
 // avoid clobbering user-applied labels on updates. Returns undefined when no
 // label add is requested, so callers can pass through unchanged.
-function mergeLabelIds(existingPerson, addLabelId) {
+export function mergeLabelIds(existingPerson, addLabelId) {
   if (!addLabelId) return undefined;
   const existing = Array.isArray(existingPerson?.label_ids) ? existingPerson.label_ids : [];
   return Array.from(new Set([...existing, addLabelId]));

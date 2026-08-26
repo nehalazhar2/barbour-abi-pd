@@ -4,7 +4,7 @@ import { getRolesForProject } from '../barbourabi/roles.js';
 import { getSectorName, resolveMaterialNames } from '../barbourabi/lookups.js';
 import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
 import { upsertOrg, updateOrg } from '../pipedrive/organisations.js';
-import { upsertPerson } from '../pipedrive/persons.js';
+import { upsertPerson, updatePerson, mergeLabelIds } from '../pipedrive/persons.js';
 import { upsertLead, clearIntegrationNotes, addNoteToLead } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
 
@@ -154,6 +154,25 @@ export async function processProject(project, { ownerId, source, preserveOwner =
 
   const orgByBarbourCompanyId = {};
   const personByBarbourCompanyId = {};
+  // Cache of Barbour person id → full PD person object seen this project.
+  // Same person can appear across the roles loop AND the PoOP loop (or twice
+  // in one roles loop if same person is on multiple roles). Second and later
+  // calls short-circuit search (which lags fresh creates by seconds → dupes)
+  // and go straight to updatePerson using the cached id.
+  const pdPersonByBarbourPersonId = {};
+  const upsertPersonDeduped = async (person, orgId, opts = {}) => {
+    const bid = person?.person_id;
+    if (bid && pdPersonByBarbourPersonId[bid]) {
+      const cached = pdPersonByBarbourPersonId[bid];
+      const labelIds = mergeLabelIds(cached, opts.addLabelId);
+      const updated = await updatePerson(cached.id, person, orgId, { labelIds });
+      if (updated) pdPersonByBarbourPersonId[bid] = updated;
+      return updated || cached;
+    }
+    const p = await upsertPerson(person, orgId, opts);
+    if (p?.id && bid) pdPersonByBarbourPersonId[bid] = p;
+    return p;
+  };
   for (const role of roles) {
     try {
       // Same-project multi-role dedup: if we already resolved a PD org for this
@@ -166,7 +185,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
       if (org?.id) orgByBarbourCompanyId[role.company_id] = org.id;
       for (const person of role.persons || []) {
         try {
-          const p = await upsertPerson(person, org?.id);
+          const p = await upsertPersonDeduped(person, org?.id);
           if (p?.id && !personByBarbourCompanyId[role.company_id]) {
             personByBarbourCompanyId[role.company_id] = p.id;
           }
@@ -247,7 +266,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
       );
       for (const p of slice) {
         try {
-          await upsertPerson(normalisePerson(p), pdOrgId, { addLabelId: poopLabelId });
+          await upsertPersonDeduped(normalisePerson(p), pdOrgId, { addLabelId: poopLabelId });
         } catch (err) {
           logger.warn(
             `[process] PoOP upsert failed for ${p.person_first_name || ''} ${p.person_last_name || ''} at ${role.company_name}: ${err.message}`,
