@@ -223,20 +223,6 @@ export const config = {
     from: process.env.ALERT_EMAIL_FROM,
     resendApiKey: process.env.RESEND_API_KEY,
   },
-  // One-off backfill mode — set BACKFILL_MODE=saved-searches on DO to make the
-  // worker run the full saved-search backfill on boot INSTEAD of scheduling
-  // the daily cron. Recipients for hourly progress emails come from
-  // BACKFILL_ALERT_EMAILS (comma-separated), falling back to ALERT_EMAIL.
-  // Unset the env vars after completion so a redeploy returns to normal cron.
-  backfill: {
-    mode: (process.env.BACKFILL_MODE || '').trim().toLowerCase(),
-    alertEmails: (process.env.BACKFILL_ALERT_EMAILS || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-    // How often to send progress emails (minutes). Default hourly.
-    reportEveryMinutes: parseInt(process.env.BACKFILL_REPORT_EVERY_MINUTES || '60', 10),
-  },
   dryRun: (process.env.DRY_RUN || '').toLowerCase() === 'true',
   // Optional safety cap — applied per sync (tag-sync and filter-sync each get up to N).
   // Leave at 0 for unlimited. Used to scope first live tests.

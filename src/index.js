@@ -5,7 +5,6 @@ import { sendFailureAlert } from './utils/alerts.js';
 import { runTagSync } from './sync/tagSync.js';
 import { runFilterSync } from './sync/filterSync.js';
 import { runRefreshSync } from './sync/refreshSync.js';
-import { runBackfillSavedSearches } from './sync/backfillSavedSearches.js';
 
 let running = false;
 
@@ -63,22 +62,6 @@ async function runAll(trigger = 'cron') {
 }
 
 function start() {
-  // One-off backfill mode — takes precedence over the daily cron. When set,
-  // we do NOT schedule the cron (avoids collision with the long-running
-  // backfill, which can span the 07:00 window). Unset BACKFILL_MODE on DO
-  // once the completion email arrives to return to normal scheduling.
-  if (config.backfill.mode === 'saved-searches') {
-    logger.info('[index] BACKFILL_MODE=saved-searches — running one-off saved-search backfill (cron NOT scheduled)');
-    runBackfillSavedSearches().catch(async (err) => {
-      logger.error(`[index] backfill threw: ${err.message}`);
-      await sendFailureAlert(err, { trigger: 'backfill' });
-      // Don't exit — DO would restart-loop us. Sleep forever; a redeploy
-      // (after fixing the underlying issue) picks up cleanly.
-      await new Promise(() => {});
-    });
-    return;
-  }
-
   logger.info(
     `[index] scheduling sync with cron "${config.schedule.cron}" (${config.schedule.timezone})`,
   );
