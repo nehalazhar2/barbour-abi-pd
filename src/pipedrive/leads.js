@@ -1,5 +1,6 @@
 import { requestV1 } from './client.js';
 import { flattenForV1, fields, searchByCustomField } from './customFields.js';
+import { getBarbourSearchOptions, resolveSearchOptionId } from './leadFieldOptions.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 
@@ -98,7 +99,19 @@ function labelIdsForSource(source, matchedSearches = []) {
   return ids;
 }
 
-function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches = []) {
+async function resolveBarbourSearchOptionIds(matchedSearches) {
+  if (!fields.lead.barbourSearch || !matchedSearches || matchedSearches.length === 0) return [];
+  const map = await getBarbourSearchOptions();
+  if (!map || map.size === 0) return [];
+  const ids = [];
+  for (const name of matchedSearches) {
+    const id = resolveSearchOptionId(map, name);
+    if (id != null && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches = [], barbourSearchOptionIds = []) {
   // project_start_min (ISO) is preferred for PD Date fields. If it's missing we fall
   // back to project_start (human text like "third quarter 2027") — that only works if
   // PD_FIELD_LEAD_START_DATE is a Text field. Date fields will reject the text fallback.
@@ -128,12 +141,15 @@ function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, ge
     }
     return { [key]: n, [key + '_currency']: 'GBP' };
   };
-  // Barbour Search field: joined saved-search names on filter-sourced leads.
-  // Skipped entirely when matchedSearches is empty so refreshSync and tagSync
-  // don't clobber a value populated by an earlier filter pass.
+  // Barbour Search: multi-select (`set`) field. Value = array of PD option ids
+  // resolved from the matched saved-search names by the caller. Skipped entirely
+  // when the caller didn't resolve any ids (i.e. refresh/tag paths with an empty
+  // matchedSearches) so we don't clobber a value populated by an earlier filter
+  // pass. PD's `set` fields expect the option-id array as a comma-joined string
+  // in v1 payloads.
   const barbourSearchValue =
-    fields.lead.barbourSearch && matchedSearches.length > 0
-      ? matchedSearches.join('; ')
+    fields.lead.barbourSearch && Array.isArray(barbourSearchOptionIds) && barbourSearchOptionIds.length > 0
+      ? barbourSearchOptionIds.join(',')
       : undefined;
   const customFieldValues = flattenForV1({
     // Stringify — Barbour IDs are numeric but the varchar custom field demands string.
@@ -169,7 +185,8 @@ function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, ge
 }
 
 export async function createLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches = []) {
-  const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches);
+  const optionIds = await resolveBarbourSearchOptionIds(matchedSearches);
+  const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches, optionIds);
   // Pipedrive requires at least one of person_id or organization_id on Lead create.
   if (!body.organization_id && !body.person_id) {
     throw new Error(
@@ -184,7 +201,8 @@ export async function createLead(project, primaryOrgId, primaryPersonId, ironwor
 }
 
 export async function updateLead(leadId, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [] } = {}) {
-  const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches);
+  const optionIds = await resolveBarbourSearchOptionIds(matchedSearches);
+  const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches, optionIds);
   // For legacy-adopted leads: the client's team already triaged them and set an
   // owner manually. Don't overwrite that.
   if (preserveOwner) delete body.owner_id;
