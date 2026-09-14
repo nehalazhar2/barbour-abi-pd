@@ -210,11 +210,14 @@ export const config = {
       process.env.PEOPLE_ON_OTHER_PROJECTS_MAX || '100',
       10,
     ),
-    // Client-provided job-title keywords for the PoOP filter. Case-insensitive
-    // substring match against Barbour's person_job_title. Empty list → include
-    // everyone (opt-out).
-    peopleOnOtherProjectsJobTitles:
-      (process.env.PEOPLE_ON_OTHER_PROJECTS_JOB_TITLES || '')
+    // Client-approved contact job-title keywords. Case-insensitive substring
+    // match against Barbour's person_job_title. Gates BOTH primary role
+    // contacts on the project AND PoOP enrichment so filtering is consistent
+    // (client Issue 5). Empty list → include everyone (opt-out).
+    // Env var name kept as PEOPLE_ON_OTHER_PROJECTS_JOB_TITLES for continuity
+    // with existing DO config; APPROVED_CONTACT_JOB_TITLES also honoured.
+    approvedContactJobTitles:
+      (process.env.APPROVED_CONTACT_JOB_TITLES || process.env.PEOPLE_ON_OTHER_PROJECTS_JOB_TITLES || '')
         .split(',')
         .map((s) => s.trim().toLowerCase())
         .filter(Boolean),

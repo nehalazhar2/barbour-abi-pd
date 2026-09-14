@@ -168,6 +168,31 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   const rolesAllowed = filterRoles(rolesRaw, config.barbourabi.rolesToSync);
   const roles = excludeRolesByName(rolesAllowed, config.barbourabi.excludeRoles);
 
+  // Approved-contact job-title gate. Applies to BOTH primary role contacts and
+  // PoOP enrichment so behaviour is consistent (client Issue 5). Case-insensitive
+  // substring match. Empty list → include all. `readJobTitle` unifies the two
+  // person shapes we see: role-normalised (job_title) vs PoOP raw
+  // (person_job_title / person_title).
+  const approvedTitles = config.pipedrive.approvedContactJobTitles || [];
+  const readJobTitle = (p) => p?.job_title || p?.person_job_title || p?.person_title || '';
+  const jobTitleAllowed = (title) => {
+    if (approvedTitles.length === 0) return true;
+    const lower = (title || '').toLowerCase();
+    return approvedTitles.some((k) => lower.includes(k));
+  };
+  if (approvedTitles.length > 0) {
+    for (const r of roles) {
+      const before = (r.persons || []).length;
+      r.persons = (r.persons || []).filter((p) => jobTitleAllowed(readJobTitle(p)));
+      const dropped = before - r.persons.length;
+      if (dropped > 0) {
+        logger.debug(
+          `[process] project ${projectId}: dropped ${dropped}/${before} contact(s) on ${r.company_name} (${r.role_name}) — job title outside approved list`,
+        );
+      }
+    }
+  }
+
   let usingShellOrg = false;
   if (roles.length === 0) {
     logger.warn(
@@ -266,14 +291,8 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   // label. They are NOT promoted to the lead's primary Person — that stays as
   // whatever real project contact Barbour gave us (or nothing).
   const poopLabelId = config.pipedrive.personLabels?.peopleOnOtherProjects;
-  const titleKeywords = config.pipedrive.peopleOnOtherProjectsJobTitles || [];
   if (!usingShellOrg && poopLabelId) {
     const maxPerOrg = config.pipedrive.peopleOnOtherProjectsMax;
-    const matchesTitle = (t) => {
-      if (titleKeywords.length === 0) return true; // opt-out: no filter = include all
-      const lower = (t || '').toLowerCase();
-      return titleKeywords.some((k) => lower.includes(k));
-    };
     // Dedup by company_id — same company can appear under multiple roles
     // (e.g. Anglian Water as both Client and Architect) and we don't want to
     // pull + upsert the same 30 people twice.
@@ -284,7 +303,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
       const pdOrgId = orgByBarbourCompanyId[role.company_id];
       if (!pdOrgId) continue;
       const raw = await getCompanyPeople(role.company_id, { limit: 200 });
-      const filtered = raw.filter((p) => matchesTitle(p.person_job_title || p.person_title));
+      const filtered = raw.filter((p) => jobTitleAllowed(readJobTitle(p)));
       const slice = filtered.slice(0, maxPerOrg);
       if (slice.length === 0) {
         logger.debug(
