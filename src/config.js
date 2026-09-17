@@ -247,6 +247,27 @@ export const config = {
     from: process.env.ALERT_EMAIL_FROM,
     resendApiKey: process.env.RESEND_API_KEY,
   },
+  // One-off backfill mode — set BACKFILL_MODE=reprocess on DO to make the worker
+  // run the full re-process on boot INSTEAD of scheduling the daily cron. Progress
+  // emails go to BACKFILL_ALERT_EMAILS (comma-separated), falling back to
+  // ALERT_EMAIL. Unset BACKFILL_MODE after the completion email so a redeploy
+  // returns to normal cron. See src/sync/backfillReprocess.js.
+  backfill: {
+    mode: (process.env.BACKFILL_MODE || '').trim().toLowerCase(),
+    alertEmails: (process.env.BACKFILL_ALERT_EMAILS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    reportEveryMinutes: parseInt(process.env.BACKFILL_REPORT_EVERY_MINUTES || '30', 10),
+    // Which phases to run, comma-separated. "search" = Barbour Search field +
+    // Filter-Sync label backfill (fast, ~minutes). "refresh" = full re-process of
+    // every CRM-tagged project via the refresh path (slow, ~hours). Default both,
+    // search first so the visible label fix lands quickly.
+    phases: (process.env.BACKFILL_PHASES || 'search,refresh')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  },
   dryRun: (process.env.DRY_RUN || '').toLowerCase() === 'true',
   // Optional safety cap — applied per sync (tag-sync and filter-sync each get up to N).
   // Leave at 0 for unlimited. Used to scope first live tests.

@@ -50,3 +50,40 @@ export async function sendFailureAlert(error, context = {}) {
     logger.error(`[alerts] failed to send alert email: ${mailErr.message}`);
   }
 }
+
+// Multi-recipient plain-email helper used by the one-off backfill for periodic
+// progress reports. Kept separate from sendFailureAlert so backfill pulses don't
+// get lost among daily failure notifications (different subject, multiple
+// recipients). Never sends during DRY_RUN — a dry-run backfill walks real
+// projects and would otherwise spam the recipients.
+export async function sendBackfillEmail({ to, subject, text }) {
+  const { from } = config.alerts;
+  const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
+  if (recipients.length === 0) {
+    logger.warn('[alerts] sendBackfillEmail called with no recipients — skipping');
+    return;
+  }
+  if (config.dryRun) {
+    logger.info(`[DRY RUN] sendBackfillEmail to ${recipients.join(', ')} — subject: "${subject}"`);
+    return;
+  }
+  if (!from) {
+    logger.warn('[alerts] ALERT_EMAIL_FROM not configured — skipping backfill email');
+    return;
+  }
+  const c = getClient();
+  if (!c) {
+    logger.warn('[alerts] RESEND_API_KEY not configured — skipping backfill email');
+    return;
+  }
+  try {
+    const { data, error: sendErr } = await c.emails.send({ from, to: recipients, subject, text });
+    if (sendErr) {
+      logger.error(`[alerts] resend rejected backfill email: ${sendErr.message || JSON.stringify(sendErr)}`);
+      return;
+    }
+    logger.info(`[alerts] backfill email sent to ${recipients.join(', ')} (id=${data?.id})`);
+  } catch (mailErr) {
+    logger.error(`[alerts] failed to send backfill email: ${mailErr.message}`);
+  }
+}

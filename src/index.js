@@ -5,6 +5,7 @@ import { sendFailureAlert } from './utils/alerts.js';
 import { runTagSync } from './sync/tagSync.js';
 import { runFilterSync } from './sync/filterSync.js';
 import { runRefreshSync } from './sync/refreshSync.js';
+import { runBackfillReprocess } from './sync/backfillReprocess.js';
 
 let running = false;
 
@@ -62,6 +63,22 @@ async function runAll(trigger = 'cron') {
 }
 
 function start() {
+  // One-off re-process mode — takes precedence over the daily cron. When set, we
+  // do NOT schedule the cron (the backfill spans hours and would collide with the
+  // 07:00 window). Unset BACKFILL_MODE on DO once the COMPLETE email arrives and
+  // redeploy to return to normal scheduling.
+  if (config.backfill.mode === 'reprocess') {
+    logger.info('[index] BACKFILL_MODE=reprocess — running one-off re-process (cron NOT scheduled)');
+    runBackfillReprocess().catch(async (err) => {
+      logger.error(`[index] backfill threw: ${err.message}`);
+      await sendFailureAlert(err, { trigger: 'backfill' });
+      // Don't exit — DO would restart-loop us. Sleep forever; a redeploy after
+      // fixing the underlying issue picks up cleanly (state file resumes).
+      await new Promise(() => {});
+    });
+    return;
+  }
+
   logger.info(
     `[index] scheduling sync with cron "${config.schedule.cron}" (${config.schedule.timezone})`,
   );
