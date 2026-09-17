@@ -19,6 +19,9 @@ const BARBOUR_APP_URL = (projectId) =>
   projectId ? `https://app.barbour-abi.com/app/project/${projectId}` : undefined;
 
 function toDateOnly(value) {
+  // Barbour sometimes returns a lone " " for empty text dates — trim so it
+  // short-circuits here rather than reaching new Date().
+  if (typeof value === 'string') value = value.trim();
   if (!value) return undefined;
   try {
     return new Date(value).toISOString().slice(0, 10);
@@ -112,14 +115,15 @@ async function resolveBarbourSearchOptionIds(matchedSearches) {
 }
 
 function buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches = [], barbourSearchOptionIds = []) {
-  // project_start_min (ISO) is preferred for PD Date fields. If it's missing we fall
-  // back to project_start (human text like "third quarter 2027") — that only works if
-  // PD_FIELD_LEAD_START_DATE is a Text field. Date fields will reject the text fallback.
-  const startDateValue = toDateOnly(project.project_start_min) || project.project_start;
-  // End-date pair mirrors start. project_finish_max (ISO, late bound) preferred;
-  // falls back to project_finish (text like "first quarter 2028") when absent.
-  // Same Date-vs-Text field-type caveat applies to PD_FIELD_LEAD_END_DATE.
-  const endDateValue = toDateOnly(project.project_finish_max) || project.project_finish;
+  // Both PD_FIELD_LEAD_START_DATE and PD_FIELD_LEAD_END_DATE are Date fields, so
+  // every candidate goes through toDateOnly — never raw text. Prefer the ISO
+  // bound (project_start_min / project_finish_max); fall back to the free-text
+  // sibling only if it happens to parse. Unparseable ("first quarter 2028") or
+  // blank (" ") → undefined → key dropped by flattenForV1, so the field keeps its
+  // prior value on update and stays blank on create. Sending raw text here 400s
+  // with "Invalid date string" (seen on Sedbergh School, 2026-09-17 run).
+  const startDateValue = toDateOnly(project.project_start_min) || toDateOnly(project.project_start);
+  const endDateValue = toDateOnly(project.project_finish_max) || toDateOnly(project.project_finish);
   // PD v1 monetary custom fields require TWO sibling keys: `{hash}` for the amount
   // (bare number) and `{hash}_currency` for the currency code. Sending just the
   // amount triggers "Expected monetary field to include valid attribute 'currency'".

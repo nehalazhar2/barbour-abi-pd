@@ -38,8 +38,22 @@ export async function runRefreshSync() {
     return stats;
   }
 
-  const allTagged = await getTaggedProjects(crmTagId);
-  logger.info(`[refreshSync] ${allTagged.length} project(s) currently on "${crmTagName}"`);
+  const allTaggedRaw = await getTaggedProjects(crmTagId);
+  // Barbour's tag listing can return the same project more than once (16 dupes
+  // seen on 2026-09-17 — likely pagination overlap). Dedup by project_id so we
+  // don't process — and potentially fail — the same project twice per run.
+  const seenIds = new Set();
+  const allTagged = allTaggedRaw.filter((p) => {
+    const id = Number(p.project_id);
+    if (!id || seenIds.has(id)) return false;
+    seenIds.add(id);
+    return true;
+  });
+  const dupes = allTaggedRaw.length - allTagged.length;
+  logger.info(
+    `[refreshSync] ${allTagged.length} project(s) currently on "${crmTagName}"` +
+      (dupes > 0 ? ` (${dupes} duplicate listing(s) collapsed)` : ''),
+  );
 
   // Filter by project_last_published within lookback window. Barbour returns
   // this as an ISO date string on each project. Compare against now - Ndays.
