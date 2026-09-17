@@ -21,11 +21,12 @@ import { processProject } from './processProject.js';
 // Two phases, selectable via BACKFILL_PHASES (default "refresh,search" — refresh
 // first so leads exist before search stamps them; works from an empty PD too):
 //
-//   search   Barbour Search field + Filter-Sync label backfill. Queries both saved
-//            searches with NO lookback, then PATCHes ONLY those two things on each
-//            matching Lead. Owners, values, orgs, everything else untouched. Fast.
-//            Leads that already carry Tag-Sync keep it and don't get Filter-Sync
-//            added (source marker stays honest); the field is set regardless.
+//   search   Source labels + Barbour Search field. Queries both saved searches with
+//            NO lookback. Leads whose project matches → Barbour Search field +
+//            Filter-Sync. Leads whose project matches NEITHER search can only
+//            have arrived via Ben's tag → Tag-Sync. PATCHes ONLY labels/field;
+//            owners, values, orgs untouched. A lead already carrying either
+//            source label is never re-labelled. Fast.
 //
 //   refresh  Full re-process of every CRM-tagged project through the refresh
 //            path (processProject with preserveOwner + preserveLabels). Rebuilds
@@ -110,7 +111,7 @@ function buildEmail(run, note) {
     lines.push(`   rate ${rate.toFixed(1)}/min   remaining ${remaining}   ETA ${eta}`);
     if (s.skippedPrevRun) lines.push(`   resumed past ${s.skippedPrevRun} already done in a prior worker run`);
     if (ph === 'search') {
-      lines.push(`   patched ${s.patched}   unchanged ${s.unchanged}   no-lead-in-PD ${s.noLead}   archived ${s.archived}   failed ${s.failed}`);
+      lines.push(`   patched ${s.patched}   (of which Tag-Sync inferred ${s.taggedTagSync ?? 0})   unchanged ${s.unchanged}   no-lead-in-PD ${s.noLead}   archived ${s.archived}   failed ${s.failed}`);
     } else {
       lines.push(`   created ${s.created}   updated ${s.updated}   archived (skipped) ${s.archived}   failed ${s.failed}`);
     }
@@ -231,19 +232,31 @@ async function runSearchPhase(run, report) {
   }
   logger.info(`[backfill:search] ${leads.length} PD lead(s), ${leadByPid.size} carry a Barbour project id`);
 
-  let pids = [...searchesByProject.keys()];
-  if (config.maxProjectsPerSync > 0 && pids.length > config.maxProjectsPerSync) {
-    logger.warn(`[backfill:search] capping ${pids.length} → ${config.maxProjectsPerSync} (MAX_PROJECTS_PER_SYNC)`);
-    pids = pids.slice(0, config.maxProjectsPerSync);
+  // Work list, two kinds:
+  //   filter — project matches ≥1 saved search → Barbour Search field + Filter-Sync
+  //   tag    — CRM-tagged lead whose project matches NO saved search. The only way
+  //            such a project reaches Pipedrive is via Ben's tag, so Tag-Sync is
+  //            the honest source marker. Restores the label on a fresh rebuild,
+  //            where the refresh phase creates every lead with Barbour ABI only.
+  // A lead that already carries either source label is never re-labelled.
+  const work = [];
+  for (const pid of searchesByProject.keys()) work.push({ pid, kind: 'filter' });
+  for (const pid of leadByPid.keys()) if (!searchesByProject.has(pid)) work.push({ pid, kind: 'tag' });
+  if (config.maxProjectsPerSync > 0 && work.length > config.maxProjectsPerSync) {
+    logger.warn(`[backfill:search] capping ${work.length} → ${config.maxProjectsPerSync} (MAX_PROJECTS_PER_SYNC)`);
+    // Keep a mix so smoke tests exercise both kinds.
+    const half = Math.ceil(config.maxProjectsPerSync / 2);
+    work.splice(0, work.length, ...work.filter((w) => w.kind === 'filter').slice(0, half), ...work.filter((w) => w.kind === 'tag').slice(0, config.maxProjectsPerSync - half));
   }
+  logger.info(`[backfill:search] ${work.filter((w) => w.kind === 'filter').length} search-matched project(s), ${work.filter((w) => w.kind === 'tag').length} CRM-only lead(s) → Tag-Sync`);
 
   const prev = loadState(phase);
   const done = new Set(prev?.doneIds || []);
-  const s = newStats(pids.length, done.size, { patched: 0, unchanged: 0, noLead: 0, archived: 0, archivedLeads: [] });
+  const s = newStats(work.length, done.size, { patched: 0, unchanged: 0, noLead: 0, archived: 0, taggedTagSync: 0, archivedLeads: [] });
   run.stats[phase] = s;
   run.currentPhase = phase;
 
-  for (const pid of pids) {
+  for (const { pid, kind } of work) {
     if (done.has(pid)) continue;
     const lead = leadByPid.get(pid);
     const matched = searchesByProject.get(pid) || [];
@@ -255,19 +268,26 @@ async function runSearchPhase(run, report) {
         logger.warn(`[backfill:search] ${pid} ("${lead.title || ''}") — PD lead ${lead.id} is archived, skipped`);
       }
       else {
-        // Desired field value: comma-joined option ids (v1 `set` format).
-        const ids = [...new Set(matched.map((n) => resolveSearchOptionId(optionsMap, n)).filter((x) => x != null))].sort((a, b) => a - b);
-        const wantField = ids.length ? ids.join(',') : undefined;
-        const curField = lead[fields.lead.barbourSearch];
-        const curIds = empty(curField) ? [] : String(curField).split(',').map((x) => Number(x.trim())).filter(Boolean).sort((a, b) => a - b);
-        const fieldChanged = wantField !== undefined && curIds.join(',') !== ids.join(',');
-
-        // Desired labels: keep everything already there; ensure Barbour ABI; add
-        // Filter-Sync unless the lead is a Tag-Sync lead.
         const cur = new Set(lead.label_ids || []);
+        const hasTag = tagSync && cur.has(tagSync);
+        const hasFilter = filterSync && cur.has(filterSync);
         const want = new Set(cur);
         if (barbour) want.add(barbour);
-        if (filterSync && !(tagSync && cur.has(tagSync))) want.add(filterSync);
+
+        let fieldChanged = false;
+        let wantField;
+        if (kind === 'filter') {
+          // Desired field value: comma-joined option ids (v1 `set` format).
+          const ids = [...new Set(matched.map((n) => resolveSearchOptionId(optionsMap, n)).filter((x) => x != null))].sort((a, b) => a - b);
+          wantField = ids.length ? ids.join(',') : undefined;
+          const curField = lead[fields.lead.barbourSearch];
+          const curIds = empty(curField) ? [] : String(curField).split(',').map((x) => Number(x.trim())).filter(Boolean).sort((a, b) => a - b);
+          fieldChanged = wantField !== undefined && curIds.join(',') !== ids.join(',');
+          if (filterSync && !hasTag) want.add(filterSync);
+        } else if (tagSync && !hasFilter && !hasTag) {
+          want.add(tagSync);
+          s.taggedTagSync += 1;
+        }
         const labelsChanged = want.size !== cur.size;
 
         if (!fieldChanged && !labelsChanged) { s.unchanged += 1; }
@@ -290,7 +310,7 @@ async function runSearchPhase(run, report) {
     await report();
   }
   s.finishedAt = Date.now();
-  logger.info(`[backfill:search] DONE — patched=${s.patched} unchanged=${s.unchanged} noLead=${s.noLead} archived=${s.archived} failed=${s.failed}`);
+  logger.info(`[backfill:search] DONE — patched=${s.patched} (tagSyncInferred=${s.taggedTagSync}) unchanged=${s.unchanged} noLead=${s.noLead} archived=${s.archived} failed=${s.failed}`);
 }
 
 // ---------------------------------------------------------------------------
