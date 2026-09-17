@@ -18,7 +18,8 @@ import { processProject } from './processProject.js';
 // deleting and re-importing. Run once on DO by setting BACKFILL_MODE=reprocess;
 // unset it after the COMPLETE email so the next redeploy returns to normal cron.
 //
-// Two phases, selectable via BACKFILL_PHASES (default "search,refresh"):
+// Two phases, selectable via BACKFILL_PHASES (default "refresh,search" — refresh
+// first so leads exist before search stamps them; works from an empty PD too):
 //
 //   search   Barbour Search field + Filter-Sync label backfill. Queries both saved
 //            searches with NO lookback, then PATCHes ONLY those two things on each
@@ -32,16 +33,29 @@ import { processProject } from './processProject.js';
 //            project, ~4h for 1,300. Never touches owner or labels on updates.
 //
 // Design notes (same shape as the Aug-2026 saved-search backfill):
-//   - Resume state persisted to a local file per phase. DO's ephemeral FS survives
-//     worker restarts within a deploy, so a crash + auto-restart resumes rather
-//     than starting over. A fresh deploy wipes it — correct semantics.
+//   - Resume state persisted to a local file per phase. Survives an in-process
+//     crash+retry but NOT a container restart on DO (each restart is a fresh
+//     container, /tmp included) — so the parkForever() below matters: if the
+//     process exits after COMPLETE, DO restarts it and the run repeats.
 //   - Progress email every BACKFILL_REPORT_EVERY_MINUTES (default 30) to
 //     BACKFILL_ALERT_EMAILS, so nobody has to babysit DO Runtime Logs.
 //   - MAX_PROJECTS_PER_SYNC caps each phase — lets us smoke-test the whole
 //     pipeline against a tiny slice (DRY_RUN=true MAX_PROJECTS_PER_SYNC=2).
-//   - On completion the process sleeps forever so DO doesn't treat exit as a
-//     crash and restart-loop the backfill. Unset BACKFILL_MODE + redeploy to
-//     return to cron mode.
+//   - On completion runBackfillReprocess() RESOLVES; index.js then schedules the
+//     normal cron in the same process (so a 07:00 run isn't missed) and the
+//     process stays alive on the cron's timer. Unset BACKFILL_MODE + redeploy
+//     afterwards so a future container restart doesn't re-run the backfill.
+
+// Park the process without exiting. `await new Promise(() => {})` is NOT enough:
+// once the last HTTP request resolves there are no handles left, Node's event
+// loop drains, and the process exits 0 — DO reads that as a crash, restarts the
+// container (fresh /tmp, so no resume state), and the whole backfill runs again.
+// That's exactly what happened on 17 Sept 2026. A live interval keeps the loop
+// alive indefinitely.
+export function parkForever() {
+  setInterval(() => {}, 1 << 30);
+  return new Promise(() => {});
+}
 
 const STATE_DIR = process.env.BACKFILL_STATE_DIR || '/tmp';
 const stateFile = (phase) => path.join(STATE_DIR, `barbour-backfill-${phase}.json`);
@@ -359,9 +373,8 @@ export async function runBackfillReprocess() {
   }
 
   run.currentPhase = null;
-  await sendProgress(run, 'COMPLETE — unset BACKFILL_MODE on DO and redeploy to return to normal cron');
-  logger.info('[backfill] all phases done — sleeping forever to prevent DO restart loop. Unset BACKFILL_MODE + redeploy.');
-  await new Promise(() => {});
+  await sendProgress(run, 'COMPLETE — normal cron now scheduled in this process; unset BACKFILL_MODE on DO so a restart does not re-run this');
+  logger.info('[backfill] all phases done — handing back to cron scheduler. Unset BACKFILL_MODE + redeploy when convenient.');
 }
 
 // Test-only surface (same convention as processProject.js) — lets smoke tests

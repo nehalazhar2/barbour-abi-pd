@@ -259,11 +259,13 @@ export const config = {
       .map((s) => s.trim())
       .filter(Boolean),
     reportEveryMinutes: parseInt(process.env.BACKFILL_REPORT_EVERY_MINUTES || '30', 10),
-    // Which phases to run, comma-separated. "search" = Barbour Search field +
-    // Filter-Sync label backfill (fast, ~minutes). "refresh" = full re-process of
-    // every CRM-tagged project via the refresh path (slow, ~hours). Default both,
-    // search first so the visible label fix lands quickly.
-    phases: (process.env.BACKFILL_PHASES || 'search,refresh')
+    // Which phases to run, comma-separated. "refresh" = full re-process of every
+    // CRM-tagged project via the refresh path (slow, ~hours; CREATES leads that
+    // don't exist). "search" = Barbour Search field + Filter-Sync label on every
+    // lead matching a saved search (fast, ~minutes). Default refresh FIRST so
+    // leads exist before search stamps them — required on a fresh/empty PD, and
+    // on a populated one it also catches leads the refresh phase creates.
+    phases: (process.env.BACKFILL_PHASES || 'refresh,search')
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),

@@ -5,7 +5,7 @@ import { sendFailureAlert } from './utils/alerts.js';
 import { runTagSync } from './sync/tagSync.js';
 import { runFilterSync } from './sync/filterSync.js';
 import { runRefreshSync } from './sync/refreshSync.js';
-import { runBackfillReprocess } from './sync/backfillReprocess.js';
+import { runBackfillReprocess, parkForever } from './sync/backfillReprocess.js';
 
 let running = false;
 
@@ -62,36 +62,42 @@ async function runAll(trigger = 'cron') {
   }
 }
 
-function start() {
-  // One-off re-process mode — takes precedence over the daily cron. When set, we
-  // do NOT schedule the cron (the backfill spans hours and would collide with the
-  // 07:00 window). Unset BACKFILL_MODE on DO once the COMPLETE email arrives and
-  // redeploy to return to normal scheduling.
-  if (config.backfill.mode === 'reprocess') {
-    logger.info('[index] BACKFILL_MODE=reprocess — running one-off re-process (cron NOT scheduled)');
-    runBackfillReprocess().catch(async (err) => {
-      logger.error(`[index] backfill threw: ${err.message}`);
-      await sendFailureAlert(err, { trigger: 'backfill' });
-      // Don't exit — DO would restart-loop us. Sleep forever; a redeploy after
-      // fixing the underlying issue picks up cleanly (state file resumes).
-      await new Promise(() => {});
-    });
-    return;
-  }
-
+function scheduleCron() {
   logger.info(
     `[index] scheduling sync with cron "${config.schedule.cron}" (${config.schedule.timezone})`,
   );
   cron.schedule(config.schedule.cron, () => runAll('cron'), {
     timezone: config.schedule.timezone,
   });
+  logger.info('[index] scheduler running. Press Ctrl+C to exit.');
+}
+
+function start() {
+  // One-off re-process mode — runs the backfill FIRST, with the cron NOT yet
+  // scheduled (the backfill spans hours and would collide with the 07:00
+  // window). When it completes we schedule the cron in this same process so the
+  // next 07:00 run isn't missed. Unset BACKFILL_MODE on DO afterwards so a
+  // container restart doesn't start the backfill again from scratch.
+  if (config.backfill.mode === 'reprocess') {
+    logger.info('[index] BACKFILL_MODE=reprocess — running one-off re-process first (cron scheduled on completion)');
+    runBackfillReprocess()
+      .then(() => scheduleCron())
+      .catch(async (err) => {
+        logger.error(`[index] backfill threw: ${err.message}`);
+        await sendFailureAlert(err, { trigger: 'backfill' });
+        // Don't exit — DO would restart-loop us. Park (with a live handle, so the
+        // event loop can't drain) until a redeploy after fixing the issue.
+        await parkForever();
+      });
+    return;
+  }
+
+  scheduleCron();
 
   if (process.env.RUN_ON_START === 'true') {
     logger.info('[index] RUN_ON_START=true — kicking off initial run');
     runAll('startup');
   }
-
-  logger.info('[index] scheduler running. Press Ctrl+C to exit.');
 }
 
 start();
