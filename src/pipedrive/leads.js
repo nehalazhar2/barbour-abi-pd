@@ -221,19 +221,62 @@ export async function updateLead(leadId, project, primaryOrgId, primaryPersonId,
   return res.data?.data;
 }
 
+// Thrown when the matching PD lead has been archived. PD refuses updates to
+// archived leads (403 "Archived lead cannot be updated"), and we deliberately
+// don't unarchive — that's the client's call. Callers can recognise this via
+// `code === 'LEAD_ARCHIVED'` and report it distinctly from real failures.
+export class ArchivedLeadError extends Error {
+  constructor(lead, project) {
+    super(
+      `Lead ${lead.id} ("${lead.title || ''}") for Barbour project ${project.project_id} is archived in Pipedrive — not updated`,
+    );
+    this.name = 'ArchivedLeadError';
+    this.code = 'LEAD_ARCHIVED';
+    this.leadId = lead.id;
+    this.leadTitle = lead.title;
+    this.projectId = project.project_id;
+  }
+}
+
+// True for our pre-check error AND for PD's own 403 — the search item doesn't
+// always carry is_archived, so the update can still hit PD's refusal.
+export function isArchivedLeadError(err) {
+  if (err?.code === 'LEAD_ARCHIVED') return true;
+  if (err?.response?.status !== 403) return false;
+  return /archived/i.test(JSON.stringify(err.response?.data || ''));
+}
+
 export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [] } = {}) {
   const { lead: existing, viaLegacy } = await findLeadByBarbourId(project.project_id);
   if (existing?.id) {
+    if (existing.is_archived === true) {
+      logger.warn(
+        `[pd-lead] lead ${existing.id} ("${existing.title || ''}") for project ${project.project_id} is ARCHIVED in PD — skipping update (unarchive it or remove the Barbour tag)`,
+      );
+      throw new ArchivedLeadError(existing, project);
+    }
     logger.debug(`[pd-lead] updating lead ${existing.id} (${project.project_title})${viaLegacy ? ' [adopted]' : ''}`);
-    return {
-      lead: await updateLead(
-        existing.id, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields,
-        // Legacy-adoption path forces preserveOwner; caller flags are merged on top.
-        { preserveOwner: viaLegacy || preserveOwner, preserveLabels, matchedSearches },
-      ),
-      created: false,
-      adopted: viaLegacy,
-    };
+    try {
+      return {
+        lead: await updateLead(
+          existing.id, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields,
+          // Legacy-adoption path forces preserveOwner; caller flags are merged on top.
+          { preserveOwner: viaLegacy || preserveOwner, preserveLabels, matchedSearches },
+        ),
+        created: false,
+        adopted: viaLegacy,
+      };
+    } catch (err) {
+      // Normalise PD's 403 into the same error shape as the pre-check so every
+      // caller sees one consistent signal.
+      if (isArchivedLeadError(err)) {
+        logger.warn(
+          `[pd-lead] PD refused update — lead ${existing.id} ("${existing.title || ''}") for project ${project.project_id} is archived`,
+        );
+        throw new ArchivedLeadError(existing, project);
+      }
+      throw err;
+    }
   }
   logger.debug(`[pd-lead] creating lead (${project.project_title})`);
   return {

@@ -9,6 +9,7 @@ import { getBarbourSearchOptions, resolveSearchOptionId } from '../pipedrive/lea
 import { getSavedSearchByName } from '../barbourabi/savedSearches.js';
 import { getProjectsByQuery, getTaggedProjects } from '../barbourabi/projects.js';
 import { getTagIdByName } from '../barbourabi/tags.js';
+import { isArchivedLeadError } from '../pipedrive/leads.js';
 import { processProject } from './processProject.js';
 
 // One-off re-process of the existing Pipedrive data so records imported before the
@@ -97,7 +98,7 @@ function buildEmail(run, note) {
     if (ph === 'search') {
       lines.push(`   patched ${s.patched}   unchanged ${s.unchanged}   no-lead-in-PD ${s.noLead}   archived ${s.archived}   failed ${s.failed}`);
     } else {
-      lines.push(`   created ${s.created}   updated ${s.updated}   failed ${s.failed}`);
+      lines.push(`   created ${s.created}   updated ${s.updated}   archived (skipped) ${s.archived}   failed ${s.failed}`);
     }
     if (s.lastItem) lines.push(`   last: ${s.lastItem}`);
     if (s.failures?.length) {
@@ -106,6 +107,21 @@ function buildEmail(run, note) {
     }
     lines.push(``);
   }
+
+  // Archived leads get their own section — full list, not rolling — because
+  // they're a decision for the client (unarchive vs untag) rather than a bug.
+  const archived = run.phases.flatMap((ph) => (run.stats[ph]?.archivedLeads || []).map((a) => ({ ...a, phase: ph })));
+  if (archived.length) {
+    const base = config.pipedrive.appBaseUrl ? config.pipedrive.appBaseUrl.replace(/\/$/, '') : null;
+    lines.push(`ARCHIVED LEADS SKIPPED (${archived.length}) — Pipedrive won't let the sync update an archived lead.`);
+    lines.push(`Either unarchive the lead in Pipedrive, or remove the CRM tag in Barbour to stop it being retried:`);
+    for (const a of archived) {
+      const url = base && a.leadId ? `  ${base}/leads/inbox/${a.leadId}` : '';
+      lines.push(`  • [${a.phase}] Barbour ${a.pid}  "${a.title || ''}"${url}`);
+    }
+    lines.push(``);
+  }
+
   if (note) lines.push(`--- ${note} ---`);
   return lines.join('\n');
 }
@@ -209,7 +225,7 @@ async function runSearchPhase(run, report) {
 
   const prev = loadState(phase);
   const done = new Set(prev?.doneIds || []);
-  const s = newStats(pids.length, done.size, { patched: 0, unchanged: 0, noLead: 0, archived: 0 });
+  const s = newStats(pids.length, done.size, { patched: 0, unchanged: 0, noLead: 0, archived: 0, archivedLeads: [] });
   run.stats[phase] = s;
   run.currentPhase = phase;
 
@@ -219,7 +235,11 @@ async function runSearchPhase(run, report) {
     const matched = searchesByProject.get(pid) || [];
     try {
       if (!lead) { s.noLead += 1; }
-      else if (lead.is_archived) { s.archived += 1; }
+      else if (lead.is_archived) {
+        s.archived += 1;
+        s.archivedLeads.push({ pid, title: lead.title, leadId: lead.id });
+        logger.warn(`[backfill:search] ${pid} ("${lead.title || ''}") — PD lead ${lead.id} is archived, skipped`);
+      }
       else {
         // Desired field value: comma-joined option ids (v1 `set` format).
         const ids = [...new Set(matched.map((n) => resolveSearchOptionId(optionsMap, n)).filter((x) => x != null))].sort((a, b) => a - b);
@@ -286,7 +306,7 @@ async function runRefreshPhase(run, report) {
 
   const prev = loadState(phase);
   const done = new Set(prev?.doneIds || []);
-  const s = newStats(projects.length, done.size, { created: 0, updated: 0 });
+  const s = newStats(projects.length, done.size, { created: 0, updated: 0, archived: 0, archivedLeads: [] });
   run.stats[phase] = s;
   run.currentPhase = phase;
 
@@ -298,8 +318,16 @@ async function runRefreshPhase(run, report) {
       if (result.created) s.created += 1; else s.updated += 1;
       s.lastItem = `${pid} ${project.project_title || ''}`.slice(0, 110);
     } catch (err) {
-      recordFailure(s, pid, project.project_title, err);
-      logger.error(`[backfill:refresh] ${pid} (${project.project_title}) failed: ${err.message}`);
+      if (isArchivedLeadError(err)) {
+        // Not a failure — a decision for the client. Tracked separately and
+        // listed in full in every progress email.
+        s.archived += 1;
+        s.archivedLeads.push({ pid, title: project.project_title, leadId: err.leadId });
+        logger.warn(`[backfill:refresh] ${pid} ("${project.project_title || ''}") — PD lead ${err.leadId || '?'} is archived, skipped`);
+      } else {
+        recordFailure(s, pid, project.project_title, err);
+        logger.error(`[backfill:refresh] ${pid} (${project.project_title}) failed: ${err.message}`);
+      }
     }
     s.processed += 1;
     done.add(pid);
@@ -307,7 +335,7 @@ async function runRefreshPhase(run, report) {
     await report();
   }
   s.finishedAt = Date.now();
-  logger.info(`[backfill:refresh] DONE — created=${s.created} updated=${s.updated} failed=${s.failed}`);
+  logger.info(`[backfill:refresh] DONE — created=${s.created} updated=${s.updated} archived=${s.archived} failed=${s.failed}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -335,3 +363,7 @@ export async function runBackfillReprocess() {
   logger.info('[backfill] all phases done — sleeping forever to prevent DO restart loop. Unset BACKFILL_MODE + redeploy.');
   await new Promise(() => {});
 }
+
+// Test-only surface (same convention as processProject.js) — lets smoke tests
+// render the email body without running a phase.
+export const __test__ = { buildEmail };
