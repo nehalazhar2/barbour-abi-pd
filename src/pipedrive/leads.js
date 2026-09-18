@@ -76,7 +76,7 @@ function normaliseSearchName(s) {
 // configured. When that field IS set, the per-search labels are suppressed —
 // the field replaces them so PD isn't cluttered with duplicate signal. Unset
 // env vars are silently skipped.
-function labelIdsForSource(source, matchedSearches = []) {
+export function labelIdsForSource(source, matchedSearches = []) {
   const { barbour, tagSync, filterSync, searchMap } = config.pipedrive.leadLabels;
   const ids = [];
   if (barbour) ids.push(barbour);
@@ -201,7 +201,37 @@ export async function createLead(project, primaryOrgId, primaryPersonId, ironwor
     { method: 'POST', url: '/leads', data: body },
     { label: 'pd-createLead' },
   );
-  return res.data?.data;
+  const created = res.data?.data;
+  // Diagnostic: does PD's POST response carry every label we sent? Seen on
+  // 17–18 Sept 2026: leads created with [Barbour ABI, Filter-Sync] ended up with
+  // only [Barbour ABI] a few seconds later. Logging the response tells us
+  // whether the POST itself drops it or something afterwards does.
+  if (created && Array.isArray(body.label_ids) && !config.dryRun) {
+    const got = new Set(created.label_ids || []);
+    const missing = body.label_ids.filter((id) => !got.has(id));
+    if (missing.length) {
+      logger.warn(`[pd-lead] POST /leads response for "${body.title}" is missing ${missing.length} of ${body.label_ids.length} label(s) we sent — will re-assert after notes`);
+    }
+  }
+  return created;
+}
+
+// Re-assert a lead's labels with a minimal PATCH. Used after the post-create
+// housekeeping (note wipe + materials note): attaching a note appears to re-save
+// the lead server-side with a stale label set, which drops labels applied by the
+// POST moments earlier. Custom fields survive that; labels don't. A label-only
+// PATCH afterwards is cheap and deterministic. No-op when the lead already
+// carries every expected label.
+export async function ensureLeadLabels(leadId, expectedLabelIds) {
+  if (!leadId || !Array.isArray(expectedLabelIds) || expectedLabelIds.length === 0) return false;
+  const res = await requestV1({ method: 'GET', url: `/leads/${leadId}` }, { label: 'pd-lead-readLabels' });
+  const current = new Set(res.data?.data?.label_ids || []);
+  const missing = expectedLabelIds.filter((id) => !current.has(id));
+  if (missing.length === 0) return false;
+  const union = [...new Set([...current, ...expectedLabelIds])];
+  await requestV1({ method: 'PATCH', url: `/leads/${leadId}`, data: { label_ids: union } }, { label: 'pd-lead-ensureLabels' });
+  logger.info(`[pd-lead] re-asserted ${missing.length} missing label(s) on lead ${leadId} after post-create housekeeping`);
+  return true;
 }
 
 export async function updateLead(leadId, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [] } = {}) {

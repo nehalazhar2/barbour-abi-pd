@@ -5,7 +5,7 @@ import { getSectorName, resolveMaterialNames } from '../barbourabi/lookups.js';
 import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
 import { upsertOrg, updateOrg } from '../pipedrive/organisations.js';
 import { upsertPerson, updatePerson, mergeLabelIds } from '../pipedrive/persons.js';
-import { upsertLead, clearIntegrationNotes, addNoteToLead } from '../pipedrive/leads.js';
+import { upsertLead, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
 
 // Pack associated orgs into the ordered leadOrgSlots array. Primary org goes into
@@ -358,6 +358,19 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     // Materials note is derived from Barbour data and regenerated every sync so
     // it stays fresh (Ben's explicit ask: "Barbour info would be most recent").
     await maybeWriteMaterialsNote(lead.id, project);
+
+    // Freshly created leads have been observed losing every label but the first
+    // within seconds of creation — the timing lines up with the note writes
+    // above. Re-assert the intended source labels once the notes are done. Only
+    // on create: updates either send label_ids themselves (tag/filter) or
+    // deliberately preserve whatever is there (refresh).
+    if (created) {
+      try {
+        await ensureLeadLabels(lead.id, labelIdsForSource(source, matchedSearches));
+      } catch (err) {
+        logger.warn(`[process] could not re-assert labels on new lead ${lead.id}: ${err.message}`);
+      }
+    }
   }
 
   return { leadId: lead?.id, created, orgCount: Object.keys(orgByBarbourCompanyId).length };
