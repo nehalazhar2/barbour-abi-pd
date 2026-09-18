@@ -276,7 +276,10 @@ export function isArchivedLeadError(err) {
   return /archived/i.test(JSON.stringify(err.response?.data || ''));
 }
 
-export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [] } = {}) {
+// `createAs` — optional { source, matchedSearches } used ONLY if the lead has to
+// be created. Lets the refresh path (source 'refresh', which carries no source
+// label) create a missing lead as a proper filter- or tag-sourced lead instead.
+export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null } = {}) {
   const { lead: existing, viaLegacy } = await findLeadByBarbourId(project.project_id);
   if (existing?.id) {
     if (existing.is_archived === true) {
@@ -308,11 +311,14 @@ export async function upsertLead(project, primaryOrgId, primaryPersonId, ironwor
       throw err;
     }
   }
-  logger.debug(`[pd-lead] creating lead (${project.project_title})`);
+  const cSource = createAs?.source || source;
+  const cMatched = createAs?.matchedSearches || matchedSearches;
+  logger.debug(`[pd-lead] creating lead (${project.project_title})${createAs ? ` as ${cSource}` : ''}`);
   return {
-    lead: await createLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches),
+    lead: await createLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, cSource, extraCustomFields, cMatched),
     created: true,
     adopted: false,
+    createdAs: { source: cSource, matchedSearches: cMatched },
   };
 }
 

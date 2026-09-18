@@ -3,6 +3,7 @@ import { logger } from '../utils/logger.js';
 import { getTagIdByName } from '../barbourabi/tags.js';
 import { getTaggedProjects } from '../barbourabi/projects.js';
 import { processProject } from './processProject.js';
+import { matchedSearchesByProject } from '../barbourabi/savedSearches.js';
 
 // Refresh sync — re-processes projects already synced (currently on the "CRM"
 // tag) so that when Barbour updates them (adds a contact, changes value,
@@ -77,16 +78,41 @@ export async function runRefreshSync() {
     `[refreshSync] ${projects.length} project(s) republished within ${lookbackDays}d → refreshing`,
   );
 
+  // If a refreshed project has NO lead (deleted in PD, or tagged "CRM" directly
+  // so tag-sync never saw it), it will be created here. A refresh-created lead
+  // has no source of its own, so decide one honestly: matches a saved search →
+  // create as filter-sync (Filter-Sync label + Barbour Search field); otherwise
+  // it can only have arrived via the tag → create as tag-sync. Existing leads
+  // are untouched by this — they take the preserve-everything update path.
+  let searchMatches = new Map();
+  if (projects.length > 0) {
+    try {
+      searchMatches = await matchedSearchesByProject(config.barbourabi.savedSearchNames);
+    } catch (err) {
+      logger.warn(`[refreshSync] could not load saved-search matches — refresh-created leads will be labelled tag-sync: ${err.message}`);
+    }
+  }
+  stats.createdAsFilter = 0;
+  stats.createdAsTag = 0;
+
   for (const project of projects) {
     try {
+      const matched = searchMatches.get(Number(project.project_id)) || [];
+      const createAs = matched.length
+        ? { source: 'filter', matchedSearches: matched }
+        : { source: 'tag', matchedSearches: [] };
       const result = await processProject(project, {
         source: 'refresh',
         // Preserve manual owner reassignments and the original source-label.
         preserveOwner: true,
         preserveLabels: true,
+        createAs,
       });
-      if (result.created) stats.created += 1;
-      else stats.updated += 1;
+      if (result.created) {
+        stats.created += 1;
+        if (result.createdAs?.source === 'filter') stats.createdAsFilter += 1; else stats.createdAsTag += 1;
+        logger.info(`[refreshSync] project ${project.project_id} had no lead — created as ${result.createdAs?.source}-sync${matched.length ? ` (${matched.join(', ')})` : ''}`);
+      } else stats.updated += 1;
     } catch (err) {
       stats.failed += 1;
       logger.error(

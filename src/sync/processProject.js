@@ -121,7 +121,7 @@ function pickPrimaryContactRole(roles, primaryName, preference = []) {
   return firstPersonlessMatch;
 }
 
-export async function processProject(project, { ownerId, source, preserveOwner = false, preserveLabels = false, matchedSearches = [] } = {}) {
+export async function processProject(project, { ownerId, source, preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null } = {}) {
   const projectId = project.project_id;
   const projectTitle = project.project_title || `Barbour project ${projectId}`;
   const projectValue = Number(project.project_value) || 0;
@@ -332,7 +332,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     ? { customFieldValues: {} }
     : buildLeadOrgSlotAssignments(roles, primaryOrgRole, orgByBarbourCompanyId);
 
-  const { lead, created } = await upsertLead(
+  const { lead, created, createdAs } = await upsertLead(
     project,
     primaryOrgId,
     primaryPersonId,
@@ -341,7 +341,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     ownerId,
     source,
     roleOrgFieldValues,
-    { preserveOwner, preserveLabels, matchedSearches },
+    { preserveOwner, preserveLabels, matchedSearches, createAs },
   );
 
   // Post-lead housekeeping — always wipe our own integration notes first (both
@@ -366,14 +366,15 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     // deliberately preserve whatever is there (refresh).
     if (created) {
       try {
-        await ensureLeadLabels(lead.id, labelIdsForSource(source, matchedSearches));
+        const cs = createdAs || { source, matchedSearches };
+        await ensureLeadLabels(lead.id, labelIdsForSource(cs.source, cs.matchedSearches));
       } catch (err) {
         logger.warn(`[process] could not re-assert labels on new lead ${lead.id}: ${err.message}`);
       }
     }
   }
 
-  return { leadId: lead?.id, created, orgCount: Object.keys(orgByBarbourCompanyId).length };
+  return { leadId: lead?.id, created, createdAs, orgCount: Object.keys(orgByBarbourCompanyId).length };
 }
 
 // Intersect the project's Barbour material codes with the client's shortlist and
