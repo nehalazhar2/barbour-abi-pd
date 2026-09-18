@@ -47,8 +47,28 @@ async function paginate(buildParams, label) {
   return all;
 }
 
-export function getTaggedProjects(tagId) {
-  return paginate(() => ({ tag_id: tagId }), 'barbourabi-getTaggedProjects');
+// Barbour's tag listing paginates by offset with no stable sort, so rows shift
+// between pages: some come back twice, others fall through the gaps entirely.
+// Observed 17 Sept 2026: five calls returned 1,299–1,363 rows for the same tag,
+// and one listing missed 57 tagged projects (4%). Each pass misses a *different*
+// random subset, so we take the union of several passes and dedup by project_id.
+// Cost: passes × ~15s. Callers that only need "is this project tagged" for a
+// handful of ids can pass { passes: 1 }.
+export async function getTaggedProjects(tagId, { passes = 3 } = {}) {
+  const byId = new Map();
+  for (let i = 0; i < passes; i += 1) {
+    const rows = await paginate(() => ({ tag_id: tagId }), 'barbourabi-getTaggedProjects');
+    let added = 0;
+    for (const p of rows) {
+      const id = Number(p?.project_id);
+      if (!id || byId.has(id)) continue;
+      byId.set(id, p);
+      added += 1;
+    }
+    logger.debug(`[projects] tag ${tagId} pass ${i + 1}/${passes}: ${rows.length} rows, ${added} new (union ${byId.size})`);
+    if (i > 0 && added === 0) break; // listing was stable this time — no need for more passes
+  }
+  return [...byId.values()];
 }
 
 // `query` is the JSON filter object (Barbour's filter DSL) — we JSON-encode it.

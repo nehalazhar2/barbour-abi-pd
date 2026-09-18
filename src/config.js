@@ -265,6 +265,10 @@ export const config = {
     // lead matching a saved search (fast, ~minutes). Default refresh FIRST so
     // leads exist before search stamps them — required on a fresh/empty PD, and
     // on a populated one it also catches leads the refresh phase creates.
+    // refresh phase: when true, projects that ALREADY have a PD lead are skipped
+    // (one dedup lookup each, no write). Turns a full re-process into a cheap
+    // "create whatever's missing" top-up — e.g. after a listing miss.
+    refreshSkipExisting: (process.env.BACKFILL_REFRESH_SKIP_EXISTING || '').toLowerCase() === 'true',
     phases: (process.env.BACKFILL_PHASES || 'refresh,search')
       .split(',')
       .map((s) => s.trim().toLowerCase())

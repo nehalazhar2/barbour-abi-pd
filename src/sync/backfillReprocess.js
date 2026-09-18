@@ -9,7 +9,7 @@ import { getBarbourSearchOptions, resolveSearchOptionId } from '../pipedrive/lea
 import { getSavedSearchByName } from '../barbourabi/savedSearches.js';
 import { getProjectsByQuery, getTaggedProjects } from '../barbourabi/projects.js';
 import { getTagIdByName } from '../barbourabi/tags.js';
-import { isArchivedLeadError } from '../pipedrive/leads.js';
+import { isArchivedLeadError, findLeadByBarbourId } from '../pipedrive/leads.js';
 import { processProject } from './processProject.js';
 
 // One-off re-process of the existing Pipedrive data so records imported before the
@@ -113,7 +113,7 @@ function buildEmail(run, note) {
     if (ph === 'search') {
       lines.push(`   patched ${s.patched}   (of which Tag-Sync inferred ${s.taggedTagSync ?? 0})   unchanged ${s.unchanged}   no-lead-in-PD ${s.noLead}   archived ${s.archived}   failed ${s.failed}`);
     } else {
-      lines.push(`   created ${s.created}   updated ${s.updated}   archived (skipped) ${s.archived}   failed ${s.failed}`);
+      lines.push(`   created ${s.created}   updated ${s.updated}   already-existed (skipped) ${s.skippedExisting ?? 0}   archived (skipped) ${s.archived}   failed ${s.failed}`);
     }
     if (s.lastItem) lines.push(`   last: ${s.lastItem}`);
     if (s.failures?.length) {
@@ -340,7 +340,9 @@ async function runRefreshPhase(run, report) {
 
   const prev = loadState(phase);
   const done = new Set(prev?.doneIds || []);
-  const s = newStats(projects.length, done.size, { created: 0, updated: 0, archived: 0, archivedLeads: [] });
+  const skipExisting = config.backfill.refreshSkipExisting;
+  if (skipExisting) logger.info('[backfill:refresh] BACKFILL_REFRESH_SKIP_EXISTING=true — only projects with NO existing lead will be processed');
+  const s = newStats(projects.length, done.size, { created: 0, updated: 0, skippedExisting: 0, archived: 0, archivedLeads: [] });
   run.stats[phase] = s;
   run.currentPhase = phase;
 
@@ -348,6 +350,14 @@ async function runRefreshPhase(run, report) {
     const pid = Number(project.project_id);
     if (done.has(pid)) continue;
     try {
+      if (skipExisting) {
+        const { lead } = await findLeadByBarbourId(pid);
+        if (lead?.id) {
+          s.skippedExisting += 1;
+          s.processed += 1; done.add(pid); saveState(phase, { doneIds: [...done] }); await report();
+          continue;
+        }
+      }
       const result = await processProject(project, { source: 'refresh', preserveOwner: true, preserveLabels: true });
       if (result.created) s.created += 1; else s.updated += 1;
       s.lastItem = `${pid} ${project.project_title || ''}`.slice(0, 110);
@@ -369,7 +379,7 @@ async function runRefreshPhase(run, report) {
     await report();
   }
   s.finishedAt = Date.now();
-  logger.info(`[backfill:refresh] DONE — created=${s.created} updated=${s.updated} archived=${s.archived} failed=${s.failed}`);
+  logger.info(`[backfill:refresh] DONE — created=${s.created} updated=${s.updated} skippedExisting=${s.skippedExisting} archived=${s.archived} failed=${s.failed}`);
 }
 
 // ---------------------------------------------------------------------------
