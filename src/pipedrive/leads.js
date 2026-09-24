@@ -216,69 +216,43 @@ export async function createLead(project, primaryOrgId, primaryPersonId, ironwor
   return created;
 }
 
-// Re-assert a lead's labels with a minimal PATCH. Used after the post-create
-// housekeeping (note wipe + materials note): attaching a note appears to re-save
-// the lead server-side with a stale label set, which drops labels applied by the
-// POST moments earlier. Custom fields survive that; labels don't. A label-only
-// PATCH afterwards is cheap and deterministic. No-op when the lead already
-// carries every expected label.
-export async function ensureLeadLabels(leadId, expectedLabelIds) {
+// Re-assert a lead's labels after the post-create housekeeping.
+//
+// Why this is a retry loop rather than a single read-and-patch: Pipedrive
+// re-saves a Lead asynchronously about a second after a Note is attached to it,
+// and that re-save drops all but the first label. Measured 24 Sept 2026 on a
+// real create:
+//   06:41:42.274  POST /leads returns   label_ids = [Barbour ABI, Filter-Sync]
+//   06:41:43.245  materials note written
+//   06:41:44.504  PD re-saves the lead, label_ids = [Barbour ABI]
+// A naive read-then-patch runs inside that window, sees both labels still
+// present, no-ops, and the re-save then clobbers them — which is exactly what
+// the first version of this function did. So: wait for PD to settle, read, and
+// only then patch; verify on the next pass and retry if it happened again.
+// Returns true if it had to write.
+export async function ensureLeadLabels(leadId, expectedLabelIds, { attempts = 4, settleMs = 3000 } = {}) {
   if (!leadId || !Array.isArray(expectedLabelIds) || expectedLabelIds.length === 0) return false;
-  const res = await requestV1({ method: 'GET', url: `/leads/${leadId}` }, { label: 'pd-lead-readLabels' });
-  const current = new Set(res.data?.data?.label_ids || []);
-  const missing = expectedLabelIds.filter((id) => !current.has(id));
-  if (missing.length === 0) return false;
-  const union = [...new Set([...current, ...expectedLabelIds])];
-  await requestV1({ method: 'PATCH', url: `/leads/${leadId}`, data: { label_ids: union } }, { label: 'pd-lead-ensureLabels' });
-  logger.info(`[pd-lead] re-asserted ${missing.length} missing label(s) on lead ${leadId} after post-create housekeeping`);
-  return true;
-}
-
-export async function updateLead(leadId, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [] } = {}) {
-  const optionIds = await resolveBarbourSearchOptionIds(matchedSearches);
-  const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches, optionIds);
-  // For legacy-adopted leads: the client's team already triaged them and set an
-  // owner manually. Don't overwrite that.
-  if (preserveOwner) delete body.owner_id;
-  // For refresh-sync updates: keep whatever source-labels were already on the lead
-  // (tag-sync vs filter-sync marker). Otherwise re-running would overwrite the
-  // original-source marker with whatever labelIdsForSource() returns for 'refresh'.
-  if (preserveLabels) delete body.label_ids;
-  const res = await requestV1(
-    { method: 'PATCH', url: `/leads/${leadId}`, data: body },
-    { label: 'pd-updateLead' },
-  );
-  return res.data?.data;
-}
-
-// Thrown when the matching PD lead has been archived. PD refuses updates to
-// archived leads (403 "Archived lead cannot be updated"), and we deliberately
-// don't unarchive — that's the client's call. Callers can recognise this via
-// `code === 'LEAD_ARCHIVED'` and report it distinctly from real failures.
-export class ArchivedLeadError extends Error {
-  constructor(lead, project) {
-    super(
-      `Lead ${lead.id} ("${lead.title || ''}") for Barbour project ${project.project_id} is archived in Pipedrive — not updated`,
+  let wrote = false;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    await new Promise((r) => setTimeout(r, settleMs));
+    const res = await requestV1({ method: 'GET', url: `/leads/${leadId}` }, { label: 'pd-lead-readLabels' });
+    const current = new Set(res.data?.data?.label_ids || []);
+    const missing = expectedLabelIds.filter((id) => !current.has(id));
+    if (missing.length === 0) {
+      if (wrote) logger.info(`[pd-lead] labels verified on lead ${leadId} after re-assert`);
+      return wrote;
+    }
+    await requestV1(
+      { method: 'PATCH', url: `/leads/${leadId}`, data: { label_ids: [...new Set([...current, ...expectedLabelIds])] } },
+      { label: 'pd-lead-ensureLabels' },
     );
-    this.name = 'ArchivedLeadError';
-    this.code = 'LEAD_ARCHIVED';
-    this.leadId = lead.id;
-    this.leadTitle = lead.title;
-    this.projectId = project.project_id;
+    wrote = true;
+    logger.info(`[pd-lead] re-asserted ${missing.length} label(s) on lead ${leadId} (attempt ${attempt}/${attempts}) — PD dropped them after the note write`);
   }
+  logger.warn(`[pd-lead] lead ${leadId} still missing labels after ${attempts} attempts — PD kept reverting them`);
+  return wrote;
 }
 
-// True for our pre-check error AND for PD's own 403 — the search item doesn't
-// always carry is_archived, so the update can still hit PD's refusal.
-export function isArchivedLeadError(err) {
-  if (err?.code === 'LEAD_ARCHIVED') return true;
-  if (err?.response?.status !== 403) return false;
-  return /archived/i.test(JSON.stringify(err.response?.data || ''));
-}
-
-// `createAs` — optional { source, matchedSearches } used ONLY if the lead has to
-// be created. Lets the refresh path (source 'refresh', which carries no source
-// label) create a missing lead as a proper filter- or tag-sourced lead instead.
 export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null } = {}) {
   const { lead: existing, viaLegacy } = await findLeadByBarbourId(project.project_id);
   if (existing?.id) {
