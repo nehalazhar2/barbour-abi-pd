@@ -216,6 +216,31 @@ export async function createLead(project, primaryOrgId, primaryPersonId, ironwor
   return created;
 }
 
+// Thrown when the matching PD lead has been archived. PD refuses updates to
+// archived leads (403 "Archived lead cannot be updated"), and we deliberately
+// don't unarchive — that's the client's call. Callers can recognise this via
+// `code === 'LEAD_ARCHIVED'` and report it distinctly from real failures.
+export class ArchivedLeadError extends Error {
+  constructor(lead, project) {
+    super(
+      `Lead ${lead.id} ("${lead.title || ''}") for Barbour project ${project.project_id} is archived in Pipedrive — not updated`,
+    );
+    this.name = 'ArchivedLeadError';
+    this.code = 'LEAD_ARCHIVED';
+    this.leadId = lead.id;
+    this.leadTitle = lead.title;
+    this.projectId = project.project_id;
+  }
+}
+
+// True for our pre-check error AND for PD's own 403 — the search item doesn't
+// always carry is_archived, so the update can still hit PD's refusal.
+export function isArchivedLeadError(err) {
+  if (err?.code === 'LEAD_ARCHIVED') return true;
+  if (err?.response?.status !== 403) return false;
+  return /archived/i.test(JSON.stringify(err.response?.data || ''));
+}
+
 // Re-assert a lead's labels after the post-create housekeeping.
 //
 // Why this is a retry loop rather than a single read-and-patch: Pipedrive
