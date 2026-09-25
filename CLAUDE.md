@@ -246,12 +246,18 @@ Awaiting the client — all four are change requests off the 22 Sept feedback, s
 
 ## Verification practices (learned the hard way)
 
-- **`node --check` does NOT catch a missing cross-module export.** It validates one file's
-  syntax only. On 24 Sept a text-span edit deleted two exports another module imports; the file
-  checked clean, the push built fine, and the worker died at import on DO. Before pushing, load
-  the real graph:
-  `node -e "import('./src/index.js').then(()=>console.log('ok'))"` plus any entrypoint that is
-  only imported conditionally (e.g. `backfillReprocess.js`).
+- **Neither `node --check` NOR an import test catches a deleted function.** A text-span edit on
+  24 Sept deleted THREE functions (`ensureLeadLabels`, `updateLead`, `ArchivedLeadError`+helper);
+  two rounds of "verification" missed `updateLead` and the 25 Sept run failed 40 of 46 projects
+  with `updateLead is not defined`. `node --check` sees valid syntax because the *call site*
+  parses fine, and importing the module graph succeeds because a missing function is a runtime
+  ReferenceError, not an import error. **Only calling the path finds it.** Before any push
+  touching `leads.js` / `processProject.js` / a sync module, run both:
+  ```
+  DRY_RUN=true MAX_PROJECTS_PER_SYNC=1 node -e "import('./src/sync/refreshSync.js').then(m=>m.runRefreshSync()).then(s=>console.log(JSON.stringify(s)))"
+  DRY_RUN=true MAX_PROJECTS_PER_SYNC=2 BARBOURABI_FILTER_LOOKBACK_HOURS=72 node -e "import('./src/sync/filterSync.js').then(m=>m.runFilterSync()).then(s=>console.log(JSON.stringify(s)))"
+  ```
+  Between them these exercise create AND update. A non-zero `failed` count is the signal.
 - **When replacing a span of text, look at what's inside the span.** The above happened because
   the replaced range ran from a function's comment to the next `export`, swallowing two
   unrelated exports that sat between them.
