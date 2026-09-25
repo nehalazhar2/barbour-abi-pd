@@ -78,3 +78,15 @@ export function getProjectsByQuery(queryObject) {
     'barbourabi-getProjectsByQuery',
   );
 }
+
+// Single project by id. Barbour returns `{ projects: {...} }` — nested and
+// SINGULAR, not an array (see CLAUDE.md). Used by the filter backfill, which
+// gets ids from the saved-search match set and needs the full field payload.
+export async function getProjectById(projectId) {
+  const res = await request(
+    { method: 'GET', url: `/projects/${projectId}`, params: { fields: PROJECT_FIELDS } },
+    { label: 'barbourabi-getProjectById' },
+  );
+  const p = res.data?.projects ?? res.data;
+  return Array.isArray(p) ? p[0] : p;
+}

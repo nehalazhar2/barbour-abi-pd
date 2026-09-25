@@ -6,9 +6,9 @@ import { sendBackfillEmail } from '../utils/alerts.js';
 import { requestV1 } from '../pipedrive/client.js';
 import { fields } from '../pipedrive/customFields.js';
 import { getBarbourSearchOptions, resolveSearchOptionId } from '../pipedrive/leadFieldOptions.js';
-import { getSavedSearchByName } from '../barbourabi/savedSearches.js';
-import { getProjectsByQuery, getTaggedProjects } from '../barbourabi/projects.js';
-import { getTagIdByName } from '../barbourabi/tags.js';
+import { getSavedSearchByName, matchedSearchesByProject } from '../barbourabi/savedSearches.js';
+import { getProjectsByQuery, getTaggedProjects, getProjectById } from '../barbourabi/projects.js';
+import { getTagIdByName, ensureTagOnProject } from '../barbourabi/tags.js';
 import { isArchivedLeadError, findLeadByBarbourId } from '../pipedrive/leads.js';
 import { processProject } from './processProject.js';
 
@@ -110,7 +110,10 @@ function buildEmail(run, note) {
     lines.push(`[${ph}]  ${done}/${s.total}  ${s.finishedAt ? 'COMPLETE' : 'running'}`);
     lines.push(`   rate ${rate.toFixed(1)}/min   remaining ${remaining}   ETA ${eta}`);
     if (s.skippedPrevRun) lines.push(`   resumed past ${s.skippedPrevRun} already done in a prior worker run`);
-    if (ph === 'search') {
+    if (ph === 'filter') {
+      lines.push(`   created ${s.created}   already-had-a-lead (skipped) ${s.skippedExisting}   archived ${s.archived}   failed ${s.failed}`);
+      if (s.budgetStopped) lines.push(`   ⏳ STOPPED ON RUNTIME BUDGET — ${s.remaining} project(s) still to import. Re-run to continue.`);
+    } else if (ph === 'search') {
       lines.push(`   patched ${s.patched}   (of which Tag-Sync inferred ${s.taggedTagSync ?? 0})   unchanged ${s.unchanged}   no-lead-in-PD ${s.noLead}   archived ${s.archived}   failed ${s.failed}`);
     } else {
       lines.push(`   created ${s.created}   updated ${s.updated}   already-existed (skipped) ${s.skippedExisting ?? 0}   archived (skipped) ${s.archived}   failed ${s.failed}`);
@@ -384,7 +387,104 @@ async function runRefreshPhase(run, report) {
 
 // ---------------------------------------------------------------------------
 
-const PHASES = { search: runSearchPhase, refresh: runRefreshPhase };
+
+// ---------------------------------------------------------------------------
+// Phase: filter — import every saved-search project that has no PD lead yet
+// ---------------------------------------------------------------------------
+//
+// This is the "widen the saved searches" backfill. Unlike `refresh` (which walks
+// the CRM tag) this walks the saved searches themselves with NO lookback, so it
+// picks up the full historical match set.
+//
+// Measured rate on new-region projects: ~89s each — almost every org and contact
+// is a first-time create. 3,634 projects is therefore ~90 hours, far more than
+// one overnight window. So the phase is TIME-BUDGETED: it stops cleanly at
+// BACKFILL_MAX_RUNTIME_MINUTES and hands back to the cron scheduler.
+//
+// It needs no durable resume state. Projects that already have a lead are
+// skipped after a single dedup lookup (~150ms), so the next run naturally
+// continues where this one stopped — and a container restart (which wipes /tmp)
+// costs only a re-scan, not lost work.
+async function runFilterPhase(run, report) {
+  const phase = 'filter';
+  const names = config.barbourabi.savedSearchNames;
+  if (!names.length) throw new Error('BARBOURABI_SAVED_SEARCH_NAMES not set');
+
+  const searchesByProject = await matchedSearchesByProject(names);
+  logger.info(`[backfill:filter] ${searchesByProject.size} unique project(s) across ${names.length} saved search(es): ${names.join(', ')}`);
+
+  let pids = [...searchesByProject.keys()];
+  if (config.maxProjectsPerSync > 0 && pids.length > config.maxProjectsPerSync) {
+    logger.warn(`[backfill:filter] capping ${pids.length} → ${config.maxProjectsPerSync} (MAX_PROJECTS_PER_SYNC)`);
+    pids = pids.slice(0, config.maxProjectsPerSync);
+  }
+
+  let crmTagId = null;
+  try {
+    crmTagId = await getTagIdByName(config.barbourabi.crmTagName);
+  } catch (err) {
+    logger.warn(`[backfill:filter] cannot resolve CRM tag — imported projects won't be tagged, so refreshSync won't see them: ${err.message}`);
+  }
+
+  const budgetMs = config.backfill.maxRuntimeMinutes > 0 ? config.backfill.maxRuntimeMinutes * 60 * 1000 : 0;
+  if (budgetMs) logger.info(`[backfill:filter] runtime budget ${config.backfill.maxRuntimeMinutes} min — will stop cleanly and hand back to cron`);
+
+  const prev = loadState(phase);
+  const done = new Set(prev?.doneIds || []);
+  const s = newStats(pids.length, done.size, { created: 0, updated: 0, skippedExisting: 0, archived: 0, archivedLeads: [], budgetStopped: false, remaining: 0 });
+  run.stats[phase] = s;
+  run.currentPhase = phase;
+
+  for (let i = 0; i < pids.length; i += 1) {
+    const pid = pids[i];
+    if (done.has(pid)) continue;
+
+    if (budgetMs && Date.now() - s.startedAt >= budgetMs) {
+      s.budgetStopped = true;
+      s.remaining = pids.length - i;
+      logger.warn(`[backfill:filter] runtime budget reached — stopping with ${s.remaining} project(s) left. Re-run to continue; projects already imported are skipped.`);
+      break;
+    }
+
+    try {
+      // Cheap skip: one dedup lookup. Keeps re-runs inexpensive.
+      const { lead } = await findLeadByBarbourId(pid);
+      if (lead?.id) {
+        s.skippedExisting += 1;
+        s.processed += 1; done.add(pid); saveState(phase, { doneIds: [...done] }); await report();
+        continue;
+      }
+      const project = await getProjectById(pid);
+      if (!project) throw new Error('project not found on Barbour');
+      const matched = searchesByProject.get(pid) || [];
+      const result = await processProject(project, { source: 'filter', matchedSearches: matched });
+      if (result.created) s.created += 1; else s.updated += 1;
+      if (crmTagId) {
+        try { await ensureTagOnProject(pid, crmTagId); } catch (e) {
+          logger.warn(`[backfill:filter] tag apply failed for ${pid}: ${e.message}`);
+        }
+      }
+      s.lastItem = `${pid} ${project.project_title || ''}`.slice(0, 110);
+    } catch (err) {
+      if (isArchivedLeadError(err)) {
+        s.archived += 1;
+        s.archivedLeads.push({ pid, title: err.leadTitle, leadId: err.leadId });
+        logger.warn(`[backfill:filter] ${pid} — PD lead ${err.leadId || '?'} is archived, skipped`);
+      } else {
+        recordFailure(s, pid, null, err);
+        logger.error(`[backfill:filter] ${pid} failed: ${err.message}`);
+      }
+    }
+    s.processed += 1;
+    done.add(pid);
+    saveState(phase, { doneIds: [...done] });
+    await report();
+  }
+  s.finishedAt = Date.now();
+  logger.info(`[backfill:filter] DONE — created=${s.created} skippedExisting=${s.skippedExisting} archived=${s.archived} failed=${s.failed}${s.budgetStopped ? ` (budget stopped, ${s.remaining} remaining)` : ''}`);
+}
+
+const PHASES = { filter: runFilterPhase, search: runSearchPhase, refresh: runRefreshPhase };
 
 export async function runBackfillReprocess() {
   const phases = config.backfill.phases.filter((p) => PHASES[p]);

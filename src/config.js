@@ -268,6 +268,11 @@ export const config = {
     // refresh phase: when true, projects that ALREADY have a PD lead are skipped
     // (one dedup lookup each, no write). Turns a full re-process into a cheap
     // "create whatever's missing" top-up — e.g. after a listing miss.
+    // Hard stop for a long backfill so it hands back to the cron scheduler rather
+    // than running through the 07:00 window. 0 = no limit. The filter phase needs
+    // no resume state to honour this: projects that already have a lead are
+    // skipped cheaply, so the next run continues where this one stopped.
+    maxRuntimeMinutes: parseInt(process.env.BACKFILL_MAX_RUNTIME_MINUTES || '0', 10),
     refreshSkipExisting: (process.env.BACKFILL_REFRESH_SKIP_EXISTING || '').toLowerCase() === 'true',
     phases: (process.env.BACKFILL_PHASES || 'refresh,search')
       .split(',')
