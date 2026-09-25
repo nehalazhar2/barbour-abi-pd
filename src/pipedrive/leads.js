@@ -216,6 +216,23 @@ export async function createLead(project, primaryOrgId, primaryPersonId, ironwor
   return created;
 }
 
+export async function updateLead(leadId, project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [] } = {}) {
+  const optionIds = await resolveBarbourSearchOptionIds(matchedSearches);
+  const body = buildLeadBody(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, matchedSearches, optionIds);
+  // For legacy-adopted leads: the client's team already triaged them and set an
+  // owner manually. Don't overwrite that.
+  if (preserveOwner) delete body.owner_id;
+  // For refresh-sync updates: keep whatever source-labels were already on the lead
+  // (tag-sync vs filter-sync marker). Otherwise re-running would overwrite the
+  // original-source marker with whatever labelIdsForSource() returns for 'refresh'.
+  if (preserveLabels) delete body.label_ids;
+  const res = await requestV1(
+    { method: 'PATCH', url: `/leads/${leadId}`, data: body },
+    { label: 'pd-updateLead' },
+  );
+  return res.data?.data;
+}
+
 // Thrown when the matching PD lead has been archived. PD refuses updates to
 // archived leads (403 "Archived lead cannot be updated"), and we deliberately
 // don't unarchive — that's the client's call. Callers can recognise this via
