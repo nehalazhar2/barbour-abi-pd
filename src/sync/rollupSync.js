@@ -1,4 +1,9 @@
 import crypto from 'node:crypto';
+import { config } from '../config.js';
+import { logger } from '../utils/logger.js';
+import { fields } from '../pipedrive/customFields.js';
+import { listAllLeads, listBarbourDeals } from '../pipedrive/leads.js';
+import { listBarbourOrgs, listRollupNotes, getApiUserId, writeOrgRollup } from '../pipedrive/organisations.js';
 
 // Phase 2 / A1 — organisation project roll-up.
 //
@@ -209,4 +214,86 @@ export function planWrites({ rollups, orgs, notesByOrg, cap, dayNumber, massZero
   const ordered = [...rotate(fieldWrites), ...rotate(noteWrites)];
   const writes = Number.isFinite(cap) ? ordered.slice(0, cap) : ordered;
   return { writes, candidates: ordered.length, stale: ordered.length - writes.length, zeroDrops };
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration — runs at the end of the daily run (src/index.js)
+// ---------------------------------------------------------------------------
+
+export const defaultDeps = {
+  listAllLeads,
+  listBarbourDeals,
+  listBarbourOrgs,
+  getApiUserId,
+  listRollupNotes,
+  writeOrgRollup,
+  now: Date.now,
+};
+
+export function optsFromConfig() {
+  return {
+    valueKey: fields.org.rollupValue,
+    countKey: fields.org.rollupCount,
+    includeDeals: config.rollup.includeDeals,
+    maxWrites: config.rollup.maxWrites,
+    minLeads: config.rollup.minLeads,
+    baseUrl: config.pipedrive.appBaseUrl,
+    shellCompanyId: config.barbourabi.shellCompanyId,
+    dryRun: config.dryRun,
+    keys: { projectId: fields.lead.barbourProjectId, bpv: fields.lead.barbourProjectValue, slots: fields.leadOrgSlots },
+  };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export async function runRollupSync(deps = defaultDeps, opts = optsFromConfig()) {
+  if (!opts.valueKey || !opts.countKey) {
+    logger.info('[rollupSync] off (PD_FIELD_ORG_ROLLUP_VALUE / _COUNT not set)');
+    return { skipped: true };
+  }
+  const start = deps.now();
+  logger.info(`[rollupSync] starting — cap ${opts.maxWrites}, deals ${opts.includeDeals ? 'included' : 'excluded'}${opts.dryRun ? ' [DRY RUN]' : ''}`);
+  if (!opts.baseUrl) logger.warn('[rollupSync] PIPEDRIVE_APP_BASE_URL not set — notes will list titles without links');
+
+  // Bulk reads. Every helper throws on a failed page; the floors below catch a
+  // read that "succeeded" but came back short. Either way: nothing is written.
+  const leads = await deps.listAllLeads();
+  const barbourLeads = leads.filter((l) => l[opts.keys.projectId]).length;
+  if (barbourLeads < opts.minLeads) {
+    throw new Error(`lead read looks incomplete: ${barbourLeads} Barbour leads (minimum ${opts.minLeads}) — nothing written`);
+  }
+  const deals = opts.includeDeals ? await deps.listBarbourDeals() : [];
+  const orgs = await deps.listBarbourOrgs({ valueKey: opts.valueKey, countKey: opts.countKey });
+  const userId = await deps.getApiUserId();
+  const { byOrg: notesByOrg } = await deps.listRollupNotes({ userId, isOurs: isRollupNote });
+
+  const { rollups, stats } = buildRollups({ leads, deals, orgs, keys: opts.keys, includeDeals: opts.includeDeals, shellCompanyId: opts.shellCompanyId });
+  if (rollups.size === 0) throw new Error('no Barbour organisations in the org read — nothing written');
+
+  const { writes, candidates, stale, zeroDrops } = planWrites({
+    rollups, orgs, notesByOrg,
+    cap: opts.maxWrites,
+    dayNumber: Math.floor(start / DAY_MS),
+    massZero: { min: 50, pct: 0.05 },
+  });
+
+  const result = { orgs: rollups.size, candidates, written: 0, failed: 0, stale, zeroDrops, ...stats };
+  let samples = 0;
+  for (const w of writes) {
+    const content = w.note ? renderRollupNote(w.rollup, { baseUrl: opts.baseUrl }) : undefined;
+    try {
+      await deps.writeOrgRollup(w.orgId, { fields: w.fields, note: w.note, deleteNoteIds: w.deleteNoteIds, content }, { valueKey: opts.valueKey, countKey: opts.countKey });
+      result.written += 1;
+      if (opts.dryRun && content && samples < 3) {
+        samples += 1;
+        logger.info(`[rollupSync] sample org ${w.orgId}: count=${w.rollup.count} total=${w.rollup.total} note=${content.slice(0, 600)}`);
+      }
+    } catch (err) {
+      result.failed += 1;
+      logger.error(`[rollupSync] org ${w.orgId} failed: ${err.message}`);
+    }
+  }
+  if (stale > 0) logger.warn(`[rollupSync] ${stale} org(s) still to update — later runs (or A4) will catch up`);
+  logger.info(`[rollupSync] finished in ${((deps.now() - start) / 1000).toFixed(1)}s — ${JSON.stringify(result)}`);
+  return result;
 }

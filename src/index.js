@@ -10,6 +10,7 @@ import { resetSavedSearchCache } from './barbourabi/savedSearches.js';
 import { resetTagCache } from './barbourabi/tags.js';
 import { resetClassificationRun } from './sync/leadClassification.js';
 import { runCatchupSync } from './sync/catchupSync.js';
+import { runRollupSync } from './sync/rollupSync.js';
 import { sendBackfillEmail } from './utils/alerts.js';
 
 // One lock for every pass: the daily run and the weekly catch-up must never
@@ -53,10 +54,16 @@ async function runAll(trigger = 'cron') {
       logger.error(`[runAll] refreshSync threw: ${err.message}`);
       return { error: err };
     });
+    // Phase 2 / A1 — after refresh so it sees this morning's lead changes. Off
+    // (returns { skipped }) unless the roll-up fields are configured.
+    const rollupStats = await runRollupSync().catch((err) => {
+      logger.error(`[runAll] rollupSync threw: ${err.message}`);
+      return { error: err };
+    });
 
     const secs = ((Date.now() - start) / 1000).toFixed(1);
     logger.info(
-      `[runAll] finished in ${secs}s — tag=${JSON.stringify(tagStats)} filter=${JSON.stringify(filterStats)} refresh=${JSON.stringify(refreshStats)}`,
+      `[runAll] finished in ${secs}s — tag=${JSON.stringify(tagStats)} filter=${JSON.stringify(filterStats)} refresh=${JSON.stringify(refreshStats)} rollup=${JSON.stringify(rollupStats)}`,
     );
 
     // Alert on ANY sync failure, not just when all fail. A single-sync outage
@@ -65,6 +72,7 @@ async function runAll(trigger = 'cron') {
     if (tagStats?.error) failed.push({ sync: 'tag', error: tagStats.error });
     if (filterStats?.error) failed.push({ sync: 'filter', error: filterStats.error });
     if (refreshStats?.error) failed.push({ sync: 'refresh', error: refreshStats.error });
+    if (rollupStats?.error) failed.push({ sync: 'rollup', error: rollupStats.error });
     if (failed.length > 0) {
       const summary = failed.map((f) => `${f.sync}=${f.error.message}`).join('; ');
       const alertErr = new Error(

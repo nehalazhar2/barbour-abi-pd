@@ -262,3 +262,83 @@ test('plan: value compare is to the penny (float noise is not a change)', () => 
   const { writes } = plan({ rollups: new Map([[1, r]]), orgs: [org(1, 'B1', { count: 2, value: 0.30000000000000004 })], notesByOrg: new Map([[1, [storedNote(10, r)]]]) });
   assert.deepEqual(writes, []);
 });
+
+// ---------------------------------------------------------------------------
+// runRollupSync — orchestration with fake dependencies
+// ---------------------------------------------------------------------------
+
+import { runRollupSync } from '../src/sync/rollupSync.js';
+
+function rollupWorld({ leads = [], deals = [], orgs = [org(1), org(2)], notes = new Map(), failOrg = null } = {}) {
+  const calls = { writes: [], reads: 0 };
+  const deps = {
+    listAllLeads: async () => { calls.reads += 1; return leads; },
+    listBarbourDeals: async () => deals,
+    listBarbourOrgs: async () => orgs,
+    getApiUserId: async () => 42,
+    listRollupNotes: async () => ({ byOrg: notes, scanned: 0 }),
+    writeOrgRollup: async (orgId, w) => {
+      if (orgId === failOrg) throw new Error('PD 500');
+      calls.writes.push({ orgId, ...w });
+    },
+    now: () => Date.parse('2026-10-27T07:30:00Z'),
+  };
+  return { deps, calls };
+}
+const ropts = (over = {}) => ({
+  valueKey: 'v', countKey: 'c', includeDeals: true, maxWrites: 1500, minLeads: 1,
+  baseUrl: 'https://x', shellCompanyId: '0', keys: K, ...over,
+});
+
+test('runRollup: off when either field key is unset — no reads at all', async () => {
+  const { deps, calls } = rollupWorld();
+  const s = await runRollupSync(deps, ropts({ countKey: undefined }));
+  assert.equal(s.skipped, true);
+  assert.equal(calls.reads, 0);
+});
+
+test('runRollup: writes each changed org with rendered note content', async () => {
+  const { deps, calls } = rollupWorld({ leads: [lead('L1', 100, 5000, 1, [2])] });
+  const s = await runRollupSync(deps, ropts());
+  assert.deepEqual(calls.writes.map((w) => w.orgId).sort(), [1, 2]);
+  const w1 = calls.writes.find((w) => w.orgId === 1);
+  assert.deepEqual(w1.fields, { count: 1, total: 5000 });
+  assert.equal(w1.note.action, 'create');
+  assert.ok(w1.content.includes('Lead L1') && w1.content.includes(ROLLUP_MARKER_TEXT));
+  assert.equal(s.written, 2);
+});
+
+test('runRollup: too few leads means an incomplete read — throws, writes nothing', async () => {
+  const { deps, calls } = rollupWorld({ leads: [lead('L1', 100, 5000, 1)] });
+  await assert.rejects(runRollupSync(deps, ropts({ minLeads: 5000 })), /incomplete/i);
+  assert.equal(calls.writes.length, 0);
+});
+
+test('runRollup: no eligible orgs means an incomplete org read — throws', async () => {
+  const { deps, calls } = rollupWorld({ orgs: [org(1, null)], leads: [lead('L1', 100, 5, 1)] });
+  await assert.rejects(runRollupSync(deps, ropts()), /no Barbour organisations/i);
+  assert.equal(calls.writes.length, 0);
+});
+
+test('runRollup: one org failing does not stop the rest', async () => {
+  const { deps, calls } = rollupWorld({ leads: [lead('L1', 100, 5000, 1, [2])], failOrg: 1 });
+  const s = await runRollupSync(deps, ropts());
+  assert.deepEqual(calls.writes.map((w) => w.orgId), [2]);
+  assert.equal(s.failed, 1);
+  assert.equal(s.written, 1);
+});
+
+test('runRollup: respects the per-run cap and reports the backlog', async () => {
+  const { deps, calls } = rollupWorld({ leads: [lead('L1', 100, 5000, 1, [2])] });
+  const s = await runRollupSync(deps, ropts({ maxWrites: 1 }));
+  assert.equal(calls.writes.length, 1);
+  assert.equal(s.stale, 1);
+});
+
+test('runRollup: deals not read when includeDeals is false', async () => {
+  const { deps } = rollupWorld({ leads: [lead('L1', 100, 5, 1)] });
+  let dealReads = 0;
+  deps.listBarbourDeals = async () => { dealReads += 1; return []; };
+  await runRollupSync(deps, ropts({ includeDeals: false }));
+  assert.equal(dealReads, 0);
+});
