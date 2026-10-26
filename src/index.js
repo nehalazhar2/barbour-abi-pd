@@ -6,6 +6,8 @@ import { runTagSync } from './sync/tagSync.js';
 import { runFilterSync } from './sync/filterSync.js';
 import { runRefreshSync } from './sync/refreshSync.js';
 import { runBackfillReprocess, parkForever } from './sync/backfillReprocess.js';
+import { resetSavedSearchCache } from './barbourabi/savedSearches.js';
+import { resetTagCache } from './barbourabi/tags.js';
 
 let running = false;
 
@@ -17,6 +19,10 @@ async function runAll(trigger = 'cron') {
   running = true;
   const start = Date.now();
   logger.info(`[runAll] starting sync run (trigger=${trigger})`);
+  // The worker lives for weeks between deploys. Without these, a saved search
+  // edited or deleted in Barbour keeps running as it was at the last deploy.
+  resetSavedSearchCache();
+  resetTagCache();
 
   try {
     const tagStats = await runTagSync().catch((err) => {
