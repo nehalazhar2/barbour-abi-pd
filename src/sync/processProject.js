@@ -4,7 +4,7 @@ import { getRolesForProject } from '../barbourabi/roles.js';
 import { getSectorName, resolveMaterialNames } from '../barbourabi/lookups.js';
 import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
 import { upsertOrg, updateOrg } from '../pipedrive/organisations.js';
-import { makePersonUpserter, contactLabelIds } from '../pipedrive/persons.js';
+import { makePersonUpserter, contactLabelIds, walkLabelKind } from '../pipedrive/persons.js';
 import { upsertLead, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
 import { buildClassificationFields } from './leadClassification.js';
@@ -189,8 +189,9 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   // substring match. Empty list → include all. `readJobTitle` unifies the two
   // person shapes we see: role-normalised (job_title) vs PoOP raw
   // (person_job_title / person_title).
-  // Phase 2 / A2 — every Barbour person named on this project, captured BEFORE
-  // the title filter below. A named contact whose role record fails the title
+  // Phase 2 / A2 — every Barbour person named on this project's SYNCED roles
+  // (after the role include/exclude filters — "named contacts the integration
+  // imports"), captured BEFORE the title filter below. A named contact whose role record fails the title
   // check can still turn up in the company walk; they must be labelled
   // Primary there, never Company.
   const namedPersonIds = new Set(
@@ -301,7 +302,10 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   const poopLabelId = config.pipedrive.personLabels?.peopleOnOtherProjects;
   // With A2 labels on, the walk runs on the Company Contact label even if the
   // legacy PoOP var is cleared.
-  if (!usingShellOrg && (contactLabelsOn || poopLabelId)) {
+  // Legacy walk label: PoOP, or Company Contact if only that var is set (e.g.
+  // 1066 renamed and PD_LABEL_PERSON_POOP cleared) — never silently skip.
+  const walkLegacyLabelId = poopLabelId ?? contactLabelCfg.company;
+  if (!usingShellOrg && (contactLabelsOn || walkLegacyLabelId)) {
     const maxPerOrg = config.pipedrive.peopleOnOtherProjectsMax;
     // Dedup by company_id — same company can appear under multiple roles
     // (e.g. Anglian Water as both Client and Architect) and we don't want to
@@ -328,8 +332,8 @@ export async function processProject(project, { ownerId, source, preserveOwner =
         try {
           const np = normalisePerson(p);
           const opts = contactLabelsOn
-            ? contactLabelOpts(np?.person_id != null && namedPersonIds.has(String(np.person_id)) ? 'primary' : 'company')
-            : { addLabelId: poopLabelId };
+            ? contactLabelOpts(walkLabelKind(np?.person_id, namedPersonIds))
+            : { addLabelId: walkLegacyLabelId };
           await upsertPersonDeduped(np, pdOrgId, opts);
         } catch (err) {
           logger.warn(

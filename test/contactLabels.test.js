@@ -1,7 +1,7 @@
 // Unit tests for Phase 2 / A2 — Primary Contact / Company Contact labels. No network.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { contactLabelIds, currentLabelIds, nextLabelIds, makePersonUpserter } from '../src/pipedrive/persons.js';
+import { contactLabelIds, currentLabelIds, nextLabelIds, makePersonUpserter, upsertPersonWithLabels, walkLabelKind } from '../src/pipedrive/persons.js';
 
 const PRIMARY = 2001;
 const COMPANY = 2002;
@@ -123,7 +123,7 @@ test('cache: named contact then company walk in one project → Primary only', a
   assert.equal(calls.updates[0].labelIds, undefined, 'second pass: already Primary → no label change');
 });
 
-test('cache: under DRY_RUN the cache keeps the real id and computed labels, not the fake response', async () => {
+test('cache: under DRY_RUN the cache keeps the first id and computed labels, not the fake update response', async () => {
   const { calls, upserter } = upserterWorld({ dryRun: true });
   const first = await upserter({ person_id: 77 }, 10, { labelsFor: (c) => contactLabelIds(c, 'primary', SEP) });
   await upserter({ person_id: 77 }, 10, { labelsFor: (c) => contactLabelIds(c, 'company', SEP) });
@@ -144,4 +144,67 @@ test('cache: persons without a Barbour id are never cached', async () => {
   await upserter({ person_id: null, first_name: 'A' }, 10, {});
   await upserter({ person_id: null, first_name: 'A' }, 10, {});
   assert.equal(calls.upserts.length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Code-review fixes (A2)
+// ---------------------------------------------------------------------------
+
+const adoptDeps = (found, { fetchLabels = [USER], fetchFails = false } = {}) => {
+  const calls = { updates: [], fetches: 0, creates: [] };
+  return {
+    calls,
+    deps: {
+      findById: async () => null,
+      findByEmail: async () => found,
+      findByNameOrg: async () => null,
+      fetchPerson: async (id) => { calls.fetches += 1; if (fetchFails) throw new Error('PD 503'); return { id, label_ids: fetchLabels }; },
+      update: async (id, p, org, { labelIds }) => { calls.updates.push({ id, labelIds }); return { id }; },
+      create: async (p, org, { labelIds }) => { calls.creates.push({ labelIds }); return { id: 900 }; },
+    },
+  };
+};
+
+test('adopt via email search: user labels survive the company label (the production clobber bug)', async () => {
+  const { calls, deps } = adoptDeps({ id: 5, name: 'Pat' }); // search hit — no label_ids
+  const r = await upsertPersonWithLabels({ person_id: 1, email: 'p@x' }, 10, { addLabelId: POOP }, deps);
+  assert.equal(calls.fetches, 1);
+  assert.deepEqual(calls.updates[0].labelIds, [POOP, USER].sort((a, b) => a - b));
+  assert.equal(r.person.id, 5);
+});
+
+test('adopt via email search with A2 rules: Company added, user label kept', async () => {
+  const { calls, deps } = adoptDeps({ id: 5 });
+  await upsertPersonWithLabels({ person_id: 1, email: 'p@x' }, 10, { labelsFor: (c) => contactLabelIds(c, 'company', SEP) }, deps);
+  assert.deepEqual(calls.updates[0].labelIds, [USER, COMPANY].sort((a, b) => a - b));
+});
+
+test('adopt: label read fails → labels left alone, update still happens', async () => {
+  const { calls, deps } = adoptDeps({ id: 5 }, { fetchFails: true });
+  await upsertPersonWithLabels({ person_id: 1, email: 'p@x' }, 10, { addLabelId: POOP }, deps);
+  assert.equal(calls.updates.length, 1);
+  assert.equal(calls.updates[0].labelIds, undefined);
+});
+
+test('adopt: no label intent → no label read at all', async () => {
+  const { calls, deps } = adoptDeps({ id: 5 });
+  await upsertPersonWithLabels({ person_id: 1, email: 'p@x' }, 10, {}, deps);
+  assert.equal(calls.fetches, 0);
+  assert.equal(calls.updates[0].labelIds, undefined);
+});
+
+test('cache: numeric and string person ids share one entry', async () => {
+  const { calls, upserter } = upserterWorld();
+  await upserter({ person_id: 77 }, 10, {});
+  await upserter({ person_id: '77' }, 10, {});
+  assert.equal(calls.upserts.length, 1, 'second call used the cache, not search');
+  assert.equal(calls.updates.length, 1);
+});
+
+test('walk kind: a named contact (even one dropped by the title filter) is Primary; others Company', () => {
+  const named = new Set(['77']);
+  assert.equal(walkLabelKind(77, named), 'primary');
+  assert.equal(walkLabelKind('77', named), 'primary');
+  assert.equal(walkLabelKind(78, named), 'company');
+  assert.equal(walkLabelKind(undefined, named), 'company');
 });

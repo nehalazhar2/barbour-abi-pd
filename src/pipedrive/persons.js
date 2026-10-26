@@ -206,7 +206,16 @@ export function nextLabelIds(current, { addLabelId, labelsFor } = {}) {
 // Same as upsertPerson, but also reports which labels were sent and which are
 // now known to be on the person — the per-project cache needs that, because
 // under DRY_RUN the write response is a fake with no labels.
-export async function upsertPersonWithLabels(person, orgId, opts = {}) {
+export async function upsertPersonWithLabels(person, orgId, opts = {}, deps = {}) {
+  const {
+    findById = findPersonByBarbourId,
+    findByEmail = findPersonByExactEmail,
+    findByNameOrg = findPersonByNameAndOrg,
+    update = updatePerson,
+    create = createPerson,
+    fetchPerson = getPersonById,
+  } = deps;
+  const wantsLabels = !!(opts.addLabelId || opts.labelsFor);
   if (!person) return { person: null, labelIdsSent: undefined, labelIdsKnown: null };
   const hasName = !!(person.first_name || person.last_name);
   // Nothing to key on — skip. Would just create a nameless "Unknown" row.
@@ -215,20 +224,22 @@ export async function upsertPersonWithLabels(person, orgId, opts = {}) {
   const adopt = async (existing, how) => {
     if (how) logger.info(`[pd-person] adopting existing person ${existing.id} ${how}`);
     else logger.debug(`[pd-person] updating person ${existing.id}`);
-    const cur = await currentLabelIds(existing);
+    // Only read labels when we mean to change them (a failed read would
+    // otherwise log a misleading warning on a plain update).
+    const cur = wantsLabels || Array.isArray(existing.label_ids) ? await currentLabelIds(existing, { fetchPerson }) : null;
     const sent = nextLabelIds(cur, opts);
-    const resp = await updatePerson(existing.id, person, orgId, { labelIds: sent });
+    const resp = await update(existing.id, person, orgId, { labelIds: sent });
     return { person: { ...(resp || {}), id: existing.id }, labelIdsSent: sent, labelIdsKnown: sent ?? cur };
   };
 
   // 1. Fast path: dedup by Barbour person ID.
   if (person.person_id) {
-    const existing = await findPersonByBarbourId(person.person_id);
+    const existing = await findById(person.person_id);
     if (existing?.id) return adopt(existing);
   }
   // 2. Email match — adopts persons the client's team created manually.
   if (person.email) {
-    const byEmail = await findPersonByExactEmail(person.email);
+    const byEmail = await findByEmail(person.email);
     if (byEmail?.id) return adopt(byEmail, `for "${person.email}" by email match`);
   }
   // 3. Name + org match — covers Barbour persons that arrive without an email
@@ -236,12 +247,12 @@ export async function upsertPersonWithLabels(person, orgId, opts = {}) {
   //    name check is scoped, avoiding false matches across unrelated companies.
   if (hasName && orgId) {
     const name = fullName(person);
-    const byNameOrg = await findPersonByNameAndOrg(name, orgId);
+    const byNameOrg = await findByNameOrg(name, orgId);
     if (byNameOrg?.id) return adopt(byNameOrg, `for "${name}" @ org ${orgId} by name+org match`);
   }
   logger.debug(`[pd-person] creating person ${fullName(person)}`);
   const sent = nextLabelIds([], opts);
-  const created = await createPerson(person, orgId, { labelIds: sent });
+  const created = await create(person, orgId, { labelIds: sent });
   return { person: created, labelIdsSent: sent, labelIdsKnown: sent ?? [] };
 }
 
@@ -257,7 +268,9 @@ export async function upsertPerson(person, orgId, opts = {}) {
 export function makePersonUpserter({ upsert = upsertPersonWithLabels, update = updatePerson } = {}) {
   const cache = new Map();
   return async (person, orgId, opts = {}) => {
-    const bid = person?.person_id;
+    // String keys: person_id arrives from two normalisers (roles, company
+    // people) and 77 vs "77" must hit the same entry, as the old object did.
+    const bid = person?.person_id != null && person.person_id !== '' ? String(person.person_id) : null;
     const cached = bid ? cache.get(bid) : null;
     if (cached) {
       const sent = nextLabelIds(cached.label_ids, opts);
@@ -269,4 +282,11 @@ export function makePersonUpserter({ upsert = upsertPersonWithLabels, update = u
     if (r?.person?.id && bid) cache.set(bid, { id: r.person.id, label_ids: r.labelIdsKnown });
     return r?.person ?? null;
   };
+}
+
+// Pure. Label kind for a person found in a company's staff walk: a person
+// Barbour named on this project (even one the title filter dropped from the
+// roles loop) is Primary; anyone else is Company.
+export function walkLabelKind(personId, namedPersonIds) {
+  return personId != null && namedPersonIds.has(String(personId)) ? 'primary' : 'company';
 }
