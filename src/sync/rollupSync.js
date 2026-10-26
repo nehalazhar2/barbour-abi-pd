@@ -155,3 +155,58 @@ export function renderRollupNote(rollup, { baseUrl }) {
   parts.push(`<p><i>— ${ROLLUP_MARKER_TEXT} · #${rollupHash(rollup)}</i></p>`);
   return parts.join('');
 }
+
+// Pure. Decide which orgs to write this run.
+//   - Only orgs whose fields or note content actually changed (hash compare).
+//   - Field changes first (they're what Wrekin filters on), then note-only.
+//   - At most `cap` orgs; the start point rotates with `dayNumber`, so a
+//     backlog is worked through over successive days instead of starving the
+//     same orgs. Stateless — survives restarts and deploys.
+//   - Throws if more orgs would drop to zero than any real day produces: that
+//     pattern means a bad read, and writing it would zero the CRM.
+export function planWrites({ rollups, orgs, notesByOrg, cap, dayNumber, massZero }) {
+  const orgById = new Map(orgs.map((o) => [o.id, o]));
+  const fieldWrites = [];
+  const noteWrites = [];
+  let zeroDrops = 0;
+
+  for (const r of rollups.values()) {
+    const o = orgById.get(r.orgId);
+    if (!o) continue;
+    const curCount = o.count == null ? null : Number(o.count);
+    const curValue = o.value == null ? null : pence(Number(o.value));
+    if (curCount > 0 && r.count === 0) zeroDrops += 1;
+    const fieldsChanged = curCount !== r.count || curValue !== pence(r.total);
+
+    const ours = (notesByOrg.get(r.orgId) || [])
+      .filter((n) => isRollupNote(n.content))
+      .sort((a, b) => String(b.update_time || '').localeCompare(String(a.update_time || '')) || Number(b.id) - Number(a.id));
+    const [newest, ...older] = ours;
+    let note = null;
+    if (newest) {
+      if (noteHash(newest.content) !== rollupHash(r)) note = { action: 'update', noteId: newest.id };
+    } else if (r.count > 0) {
+      note = { action: 'create', noteId: null };
+    }
+    const deleteNoteIds = older.map((n) => n.id);
+
+    if (!fieldsChanged && !note && deleteNoteIds.length === 0) continue;
+    const w = { orgId: r.orgId, fields: fieldsChanged ? { count: r.count, total: pence(r.total) } : null, note, deleteNoteIds, rollup: r };
+    (fieldsChanged ? fieldWrites : noteWrites).push(w);
+  }
+
+  const limit = Math.max(massZero.min, Math.floor(massZero.pct * rollups.size));
+  if (zeroDrops > limit) {
+    throw new Error(`${zeroDrops} organisation(s) would drop to zero leads in one run (limit ${limit}) — looks like an incomplete read; nothing written`);
+  }
+
+  const rotate = (list) => {
+    list.sort((a, b) => a.orgId - b.orgId);
+    if (list.length === 0 || !Number.isFinite(cap)) return list;
+    const offset = (dayNumber * cap) % list.length;
+    return [...list.slice(offset), ...list.slice(0, offset)];
+  };
+  const ordered = [...rotate(fieldWrites), ...rotate(noteWrites)];
+  const writes = Number.isFinite(cap) ? ordered.slice(0, cap) : ordered;
+  return { writes, candidates: ordered.length, stale: ordered.length - writes.length, zeroDrops };
+}

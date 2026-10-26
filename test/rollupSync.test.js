@@ -158,3 +158,107 @@ test('hash: survives the separator being stored as a numeric or named entity', (
 test('hash: a note without our marker has no hash', () => {
   assert.equal(noteHash('<p>Ben wrote this</p>'), null);
 });
+
+// ---------------------------------------------------------------------------
+// planWrites — only what changed, field changes first, rotating cap, guards
+// ---------------------------------------------------------------------------
+
+import { planWrites } from '../src/sync/rollupSync.js';
+
+const R = (orgId, items) => ({ orgId, count: items.length, total: items.reduce((a, i) => a + i.value, 0), items });
+const item = (id, value = 100) => ({ kind: 'lead', id, title: `T${id}`, value });
+const storedNote = (id, rollup, extra = {}) => ({ id, content: renderRollupNote(rollup, { baseUrl: 'https://x' }), update_time: '2026-10-20 07:10:00', ...extra });
+const plan = (over) => planWrites({ cap: 1000, dayNumber: 0, massZero: { min: 50, pct: 0.05 }, notesByOrg: new Map(), ...over });
+
+test('plan: an up-to-date org needs no write (re-plan over the stored note is a no-op)', () => {
+  const r = R(1, [item('a')]);
+  const { writes } = plan({ rollups: new Map([[1, r]]), orgs: [org(1, 'B1', { count: 1, value: 100 })], notesByOrg: new Map([[1, [storedNote(10, r)]]]) });
+  assert.deepEqual(writes, []);
+});
+
+test('plan: field-only change writes fields, leaves the note', () => {
+  const r = R(1, [item('a')]);
+  const { writes } = plan({ rollups: new Map([[1, r]]), orgs: [org(1, 'B1', { count: 2, value: 100 })], notesByOrg: new Map([[1, [storedNote(10, r)]]]) });
+  assert.deepEqual(writes.map((w) => [w.orgId, !!w.fields, w.note]), [[1, true, null]]);
+  assert.deepEqual(writes[0].fields, { count: 1, total: 100 });
+});
+
+test('plan: null field values (never written) count as changed; 0 is written, not blank', () => {
+  const { writes } = plan({ rollups: new Map([[1, R(1, [])]]), orgs: [org(1)] });
+  assert.deepEqual(writes[0].fields, { count: 0, total: 0 });
+  assert.equal(writes[0].note, null, 'no note created for a zero org');
+});
+
+test('plan: note-only change (e.g. a renamed lead) updates the existing note', () => {
+  const old = R(1, [item('a')]);
+  const now = R(1, [{ ...item('a'), title: 'Renamed' }]);
+  const { writes } = plan({ rollups: new Map([[1, now]]), orgs: [org(1, 'B1', { count: 1, value: 100 })], notesByOrg: new Map([[1, [storedNote(10, old)]]]) });
+  assert.equal(writes[0].fields, null);
+  assert.deepEqual({ action: writes[0].note.action, noteId: writes[0].note.noteId }, { action: 'update', noteId: 10 });
+});
+
+test('plan: an org with leads and no note gets one created', () => {
+  const { writes } = plan({ rollups: new Map([[1, R(1, [item('a')])]]), orgs: [org(1, 'B1', { count: 1, value: 100 })] });
+  assert.equal(writes[0].note.action, 'create');
+});
+
+test('plan: an org dropping to zero updates its existing note rather than leaving stale links', () => {
+  const old = R(1, [item('a')]);
+  const { writes } = plan({ rollups: new Map([[1, R(1, [])]]), orgs: [org(1, 'B1', { count: 1, value: 100 })], notesByOrg: new Map([[1, [storedNote(10, old)]]]) });
+  assert.equal(writes[0].note.action, 'update');
+});
+
+test('plan: duplicate roll-up notes — newest updated/kept, older ones deleted; user notes never touched', () => {
+  const r = R(1, [item('a')]);
+  const notes = [
+    storedNote(10, r, { update_time: '2026-10-01 07:00:00' }),
+    storedNote(11, r, { update_time: '2026-10-25 07:00:00' }),
+    { id: 12, content: '<p>Ben: call them Tuesday</p>', update_time: '2026-10-26 09:00:00' },
+  ];
+  const { writes } = plan({ rollups: new Map([[1, r]]), orgs: [org(1, 'B1', { count: 1, value: 100 })], notesByOrg: new Map([[1, notes]]) });
+  assert.equal(writes[0].note, null, 'newest (11) is current');
+  assert.deepEqual(writes[0].deleteNoteIds, [10]);
+});
+
+test('plan: field changes come before note-only changes under the cap', () => {
+  const rNote = R(1, [{ ...item('a'), title: 'New title' }]);
+  const rField = R(2, [item('b')]);
+  const { writes, stale } = plan({
+    cap: 1,
+    rollups: new Map([[1, rNote], [2, rField]]),
+    orgs: [org(1, 'B1', { count: 1, value: 100 }), org(2, 'B2', { count: 5, value: 1 })],
+    notesByOrg: new Map([[1, [storedNote(10, R(1, [item('a')]))]], [2, [storedNote(20, rField)]]]),
+  });
+  assert.deepEqual(writes.map((w) => w.orgId), [2]);
+  assert.equal(stale, 1);
+});
+
+test('plan: the cap rotates by day so every org is eventually written', () => {
+  const rollups = new Map([1, 2, 3, 4].map((id) => [id, R(id, [])]));
+  const orgs = [1, 2, 3, 4].map((id) => org(id));
+  const day0 = plan({ cap: 2, dayNumber: 0, rollups, orgs }).writes.map((w) => w.orgId);
+  const day1 = plan({ cap: 2, dayNumber: 1, rollups, orgs }).writes.map((w) => w.orgId);
+  assert.equal(new Set([...day0, ...day1]).size, 4, `day0=${day0} day1=${day1}`);
+});
+
+test('plan: mass drop to zero aborts (a bad read must never zero the CRM)', () => {
+  const ids = Array.from({ length: 200 }, (_, i) => i + 1);
+  const rollups = new Map(ids.map((id) => [id, R(id, [])]));
+  const orgs = ids.map((id) => org(id, `B${id}`, { count: 3, value: 300 }));
+  assert.throws(() => plan({ rollups, orgs }), /would drop to zero/i);
+});
+
+test('plan: a handful of genuine drops to zero is allowed', () => {
+  const ids = Array.from({ length: 2000 }, (_, i) => i + 1);
+  const rollups = new Map(ids.map((id) => [id, R(id, id <= 60 ? [] : [item(`l${id}`)])]));
+  const orgs = ids.map((id) => org(id, `B${id}`, { count: 1, value: 100 }));
+  const { zeroDrops } = plan({ rollups, orgs });
+  assert.equal(zeroDrops, 60, '60 ≤ max(50, 5% of 2000 = 100)');
+});
+
+test('plan: value compare is to the penny (float noise is not a change)', () => {
+  const r = R(1, [item('a', 0.1), item('b', 0.2)]);
+  r.total = 0.3;
+  const { writes } = plan({ rollups: new Map([[1, r]]), orgs: [org(1, 'B1', { count: 2, value: 0.30000000000000004 })], notesByOrg: new Map([[1, [storedNote(10, r)]]]) });
+  assert.deepEqual(writes, []);
+});
