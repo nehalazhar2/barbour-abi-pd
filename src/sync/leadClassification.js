@@ -75,11 +75,13 @@ export function resetClassificationWarnings() {
   warnedCodes.clear();
 }
 
-// Scalar id or undefined. Arrays/objects are ignored rather than guessed at.
+// Integer id or undefined. Only a number or a digit string counts: Barbour
+// sends empty text as " ", and Number(' ') / Number('') / Number(true) would
+// otherwise become 0/1 (Tentative/Confirmed) and CLEAR a correct value.
 function stageId(v) {
-  if (v == null || typeof v === 'object') return undefined;
-  const n = Number(v);
-  return Number.isInteger(n) ? n : undefined;
+  if (typeof v === 'number') return Number.isInteger(v) ? v : undefined;
+  if (typeof v === 'string' && /^\s*\d+\s*$/.test(v)) return Number(v);
+  return undefined;
 }
 
 export function projectStageLabels(project) {
@@ -127,6 +129,9 @@ export function resetClassificationRun() {
 export async function buildClassificationFields(project, {
   optionsFor = getSetFieldOptions,
   fieldKeys = { stage: fields.lead.projectStage, category: fields.lead.productCategory },
+  otherKeys = Object.entries(fields.lead)
+    .filter(([name, key]) => key && name !== 'projectStage' && name !== 'productCategory')
+    .map(([, key]) => key),
 } = {}) {
   const out = {};
   const plan = [
@@ -135,6 +140,12 @@ export async function buildClassificationFields(project, {
   ];
   for (const [name, key, labelsFor] of plan) {
     if (!key) continue;
+    // A mis-pasted env value equal to another Lead field's key would silently
+    // overwrite that field on every lead. Refuse it.
+    if (otherKeys.includes(key)) {
+      warnOnce(`clash:${key}`, `[classification] ${name} key ${key} is already used by another Lead field — not writing it (check PD_FIELD_LEAD_PROJECT_STAGE / PD_FIELD_LEAD_PRODUCT_CATEGORY)`);
+      continue;
+    }
     const labels = labelsFor(project);
     if (labels === undefined) continue;
     const options = await optionsFor(key);

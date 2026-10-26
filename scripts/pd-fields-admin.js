@@ -119,11 +119,13 @@ if (cmd === 'list') {
   ];
   const apply = args.includes('--apply');
   const existing = await listFields();
-  const clash = plan.filter((p) => existing.some((f) => (f.name || '').trim().toLowerCase() === p.name.toLowerCase()));
+  const findExisting = (p) => existing.find((f) => (f.name || '').trim().toLowerCase() === p.name.toLowerCase());
   for (const p of plan) console.log(`${p.name} (set, group ${BARBOUR_GROUP_ID}): ${p.labels.map((l) => `"${l}"`).join(', ')}`);
-  if (clash.length) {
-    console.error(`Refusing: field(s) already exist: ${clash.map((p) => p.name).join(', ')}. Use "list" to find their keys.`);
-    process.exit(1);
+  // Existing fields are skipped, not recreated — so a half-finished run can be
+  // re-run safely. Their keys are printed for the env.
+  for (const p of plan) {
+    const f = findExisting(p);
+    if (f) console.log(`Already exists, will skip: id=${f.id} type=${f.field_type} options=${(f.options || []).length}  →  ${p.env}=${f.key}`);
   }
   if (!apply) {
     console.log('\nPlan only. Re-run with --apply (and DRY_RUN unset) to create.');
@@ -135,6 +137,7 @@ if (cmd === 'list') {
     process.exit(1);
   }
   for (const p of plan) {
+    if (findExisting(p)) continue;
     const res = await requestV1(
       {
         method: 'POST',

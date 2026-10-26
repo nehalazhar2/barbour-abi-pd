@@ -214,10 +214,44 @@ test('options: a failed load returns null and is not retried for 60s', async () 
 test('options: success is cached for 10 minutes', async () => {
   optionsTest.resetCache();
   let fetches = 0;
-  const fetchFields = async () => { fetches += 1; return [{ key: 'k', options: [{ id: 1, label: 'A' }] }]; };
+  const fetchFields = async () => { fetches += 1; return [{ key: 'k', field_type: 'set', options: [{ id: 1, label: 'A' }] }]; };
   await getSetFieldOptions('k', { fetchFields, now: () => 0 });
   await getSetFieldOptions('k', { fetchFields, now: () => 599_000 });
   assert.equal(fetches, 1);
   await getSetFieldOptions('k', { fetchFields, now: () => 601_000 });
   assert.equal(fetches, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes (A7 T5)
+// ---------------------------------------------------------------------------
+
+import { __test__ as projectsTest } from '../src/barbourabi/projects.js';
+
+test('stage: blank strings and booleans are "unknown", never code 0/1', () => {
+  assert.equal(projectStageLabels(stamped({ project_planning_stage: ' ', project_contract_stage: '' })), undefined);
+  assert.equal(projectStageLabels(stamped({ project_planning_stage: true })), undefined);
+  assert.deepEqual(projectStageLabels(stamped({ project_planning_stage: ' ', project_contract_stage: ' 7 ' })), [AWARDED]);
+  assert.equal(projectStageLabels(stamped({ project_planning_stage: 3.5 })), undefined);
+});
+
+test('build: a key clashing with another Lead field is never written', async () => {
+  const p = stamped({ project_planning_stage: 3, project_materials: ['RD0202'] });
+  const out = await buildClassificationFields(p, { optionsFor: optionsFor(), fieldKeys: KEYS, otherKeys: ['stageKey'] });
+  assert.deepEqual(out, { catKey: '200' });
+});
+
+test('options: a non-multi-select field is treated as unavailable', async () => {
+  optionsTest.resetCache();
+  const fetchFields = async () => [{ key: 'single', field_type: 'enum', options: [{ id: 1, label: 'A' }] }];
+  assert.equal(await getSetFieldOptions('single', { fetchFields, now: () => 0 }), null);
+});
+
+test('stamp: real project rows are stamped (non-enumerable); envelopes are not', () => {
+  const row = projectsTest.stamp({ project_id: 1 });
+  assert.equal(row.__classificationFields, true);
+  assert.ok(!Object.keys(row).includes('__classificationFields'));
+  assert.equal(JSON.stringify(row), '{"project_id":1}');
+  assert.equal(projectsTest.stamp({ error: 'x' }).__classificationFields, undefined);
+  assert.equal(projectsTest.stamp(null), null);
 });

@@ -43,7 +43,8 @@ const PROJECT_FIELDS = [
 // fetched any other way (no fields=) can never blank those fields.
 // Non-enumerable: never serialised into a payload or a log line.
 function stamp(project) {
-  if (project && typeof project === 'object') {
+  // Only real project rows — never an error or empty envelope.
+  if (project && typeof project === 'object' && project.project_id != null) {
     Object.defineProperty(project, '__classificationFields', { value: true, enumerable: false, configurable: true });
   }
   return project;
@@ -118,3 +119,6 @@ export async function getProjectById(projectId) {
   const p = res.data?.projects ?? res.data;
   return stamp(Array.isArray(p) ? p[0] : p);
 }
+
+// Test-only surface.
+export const __test__ = { stamp };

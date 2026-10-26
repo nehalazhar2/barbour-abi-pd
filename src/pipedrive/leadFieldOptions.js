@@ -125,7 +125,9 @@ export async function getSetFieldOptions(fieldKey, { fetchFields = fetchAllDealF
       const all = await fetchFields();
       const map = new Map();
       for (const f of all) {
-        if (!f?.key || !Array.isArray(f.options)) continue;
+        // Only multi-select fields. A single-option field given a "1,2" value
+        // 400s — and that fails the WHOLE lead write, not just this field.
+        if (!f?.key || f.field_type !== 'set' || !Array.isArray(f.options)) continue;
         const opts = new Map();
         for (const o of f.options) if (o?.label && o.id != null) opts.set(normaliseOptionLabel(o.label), Number(o.id));
         map.set(f.key, opts);
