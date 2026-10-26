@@ -4,9 +4,15 @@
 //   rename <hash> <newName>       → PUT /dealFields/{id} { name: newName }
 //   create <name>                 → POST /dealFields { name, field_type:'org', add_visible_flag:true, ... } in group 23
 //   order <hash1,hash2,...>       → PUT each field's order_nr in given order (top first)
+//   create-a7 [--apply]           → Phase 2 / A7: create the "Project Stage" and
+//                                   "Product Category Type" multi-select (set) fields with
+//                                   the exact agreed labels. Prints the plan unless --apply.
+//                                   Refuses under DRY_RUN or if either name already exists.
 //
 // All writes go through PD's v1 API.
 import { requestV1 } from '../src/pipedrive/client.js';
+import { config } from '../src/config.js';
+import { PROJECT_STAGE_LABELS, PRODUCT_CATEGORY_LABELS } from '../src/sync/leadClassification.js';
 
 const BARBOUR_GROUP_ID = 23;
 
@@ -105,7 +111,43 @@ if (cmd === 'list') {
     );
     console.log(`  rest ${nr} → ${f.name}`);
   }
+} else if (cmd === 'create-a7') {
+  // Labels come from the same constants the sync writes with, so they can't drift.
+  const plan = [
+    { name: 'Project Stage', env: 'PD_FIELD_LEAD_PROJECT_STAGE', labels: PROJECT_STAGE_LABELS },
+    { name: 'Product Category Type', env: 'PD_FIELD_LEAD_PRODUCT_CATEGORY', labels: PRODUCT_CATEGORY_LABELS },
+  ];
+  const apply = args.includes('--apply');
+  const existing = await listFields();
+  const clash = plan.filter((p) => existing.some((f) => (f.name || '').trim().toLowerCase() === p.name.toLowerCase()));
+  for (const p of plan) console.log(`${p.name} (set, group ${BARBOUR_GROUP_ID}): ${p.labels.map((l) => `"${l}"`).join(', ')}`);
+  if (clash.length) {
+    console.error(`Refusing: field(s) already exist: ${clash.map((p) => p.name).join(', ')}. Use "list" to find their keys.`);
+    process.exit(1);
+  }
+  if (!apply) {
+    console.log('\nPlan only. Re-run with --apply (and DRY_RUN unset) to create.');
+    process.exit(0);
+  }
+  if (config.dryRun) {
+    // requestV1 fakes writes under DRY_RUN — we'd print keys that don't exist.
+    console.error('Refusing: DRY_RUN=true. Run with DRY_RUN=false to create the fields.');
+    process.exit(1);
+  }
+  for (const p of plan) {
+    const res = await requestV1(
+      {
+        method: 'POST',
+        url: '/dealFields',
+        data: { name: p.name, field_type: 'set', options: p.labels.map((label) => ({ label })), add_visible_flag: true, group_id: BARBOUR_GROUP_ID },
+      },
+      { label: 'pd-createField' },
+    );
+    const f = res.data?.data;
+    console.log(`Created: id=${f.id} key=${f.key} name="${f.name}" options=${(f.options || []).length}  →  ${p.env}=${f.key}`);
+  }
+  console.log('\nSet both env vars at BOTH DO levels (app + component) once the null-clear check has passed.');
 } else {
-  console.error('Usage: node scripts/pd-fields-admin.js list|rename|create|order ...');
+  console.error('Usage: node scripts/pd-fields-admin.js list|rename|create|order|create-a7 ...');
   process.exit(1);
 }

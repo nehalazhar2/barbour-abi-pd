@@ -149,6 +149,10 @@ export const config = {
         // per-search PD label logic in labelIdsForSource is bypassed — the field
         // replaces the labels. Multiple matches joined with "; ".
         barbourSearch: process.env.PD_FIELD_LEAD_BARBOUR_SEARCH,
+        // Phase 2 / A7 multi-selects (src/sync/leadClassification.js). Empty =
+        // never written — clearing these at both DO levels is the kill switch.
+        projectStage: process.env.PD_FIELD_LEAD_PROJECT_STAGE,
+        productCategory: process.env.PD_FIELD_LEAD_PRODUCT_CATEGORY,
         postcode: process.env.PD_FIELD_LEAD_POSTCODE,
         town: process.env.PD_FIELD_LEAD_TOWN,
         status: process.env.PD_FIELD_LEAD_STATUS,

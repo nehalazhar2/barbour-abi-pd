@@ -31,7 +31,23 @@ const PROJECT_FIELDS = [
   // processProject to intersect with the client's product shortlist and write
   // a matched-materials Note on the Lead.
   'project_materials',
+  // A7 Project Stage (src/sync/leadClassification.js). Barbour omits a field
+  // that has no value, so rows are stamped below to prove these were asked for.
+  'project_planning_stage',
+  'project_contract_stage',
+  'project_stopped',
 ].join(',');
+
+// Marks a project row as fetched WITH the fields above. leadClassification
+// only writes Project Stage / Product Category for stamped rows, so a project
+// fetched any other way (no fields=) can never blank those fields.
+// Non-enumerable: never serialised into a payload or a log line.
+function stamp(project) {
+  if (project && typeof project === 'object') {
+    Object.defineProperty(project, '__classificationFields', { value: true, enumerable: false, configurable: true });
+  }
+  return project;
+}
 
 async function paginate(buildParams, label) {
   const all = [];
@@ -41,7 +57,7 @@ async function paginate(buildParams, label) {
     const params = { ...buildParams(), fields: PROJECT_FIELDS, limit: PAGE_SIZE, offset };
     const res = await request({ method: 'GET', url: '/projects', params }, { label });
     const batch = res.data?.projects ?? [];
-    all.push(...batch);
+    all.push(...batch.map(stamp));
     if (batch.length < PAGE_SIZE) { complete = true; break; }
     offset += PAGE_SIZE;
   }
@@ -100,5 +116,5 @@ export async function getProjectById(projectId) {
     { label: 'barbourabi-getProjectById' },
   );
   const p = res.data?.projects ?? res.data;
-  return Array.isArray(p) ? p[0] : p;
+  return stamp(Array.isArray(p) ? p[0] : p);
 }

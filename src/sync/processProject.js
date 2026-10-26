@@ -7,6 +7,7 @@ import { upsertOrg, updateOrg } from '../pipedrive/organisations.js';
 import { upsertPerson, updatePerson, mergeLabelIds } from '../pipedrive/persons.js';
 import { upsertLead, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
+import { buildClassificationFields } from './leadClassification.js';
 
 // Pack associated orgs into the ordered leadOrgSlots array. Primary org goes into
 // slot 1; the remaining orgs (deduped by company_id) fill slots 2..N in
@@ -331,6 +332,9 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   const { customFieldValues: roleOrgFieldValues } = usingShellOrg
     ? { customFieldValues: {} }
     : buildLeadOrgSlotAssignments(roles, primaryOrgRole, orgByBarbourCompanyId);
+  // A7 Project Stage / Product Category Type — shell leads too (they don't
+  // depend on roles). Empty object when the fields aren't configured.
+  const classificationFieldValues = await buildClassificationFields(project);
 
   const { lead, created, createdAs } = await upsertLead(
     project,
@@ -340,7 +344,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     geoworksValue,
     ownerId,
     source,
-    roleOrgFieldValues,
+    { ...roleOrgFieldValues, ...classificationFieldValues },
     { preserveOwner, preserveLabels, matchedSearches, createAs },
   );
 

@@ -10,20 +10,17 @@
 //   2. Saved search (all projects, source=filter, default owner)
 //        node scripts/backfill-leads.js --search "Housing - Gleeson"
 //
-import { request } from '../src/barbourabi/client.js';
-import { getProjectsByQuery } from '../src/barbourabi/projects.js';
+import { getProjectsByQuery, getProjectById } from '../src/barbourabi/projects.js';
 import { getSavedSearchByName } from '../src/barbourabi/savedSearches.js';
 import { processProject } from '../src/sync/processProject.js';
 import { logger } from '../src/utils/logger.js';
 import { config } from '../src/config.js';
 
 async function fetchProject(projectId) {
-  // /projects/{id} returns a single object under `projects` (singular shape).
-  const res = await request(
-    { method: 'GET', url: `/projects/${projectId}` },
-    { label: 'backfill-getProject' },
-  );
-  return res.data?.projects ?? null;
+  // getProjectById requests PROJECT_FIELDS (incl. the A7 stage fields) and
+  // stamps the row. A bare GET /projects/{id} would make processProject treat
+  // Project Stage as unknown — and before the stamp existed, as blank.
+  return getProjectById(projectId);
 }
 
 async function runOne(project, source) {

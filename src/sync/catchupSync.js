@@ -22,6 +22,7 @@ import { getProjectsByQuery, getTaggedProjects, getProjectById } from '../barbou
 import { getTagIdByName, getProjectTags, ensureTagOnProject, resetTagCache } from '../barbourabi/tags.js';
 import { listLeadBarbourIds, findLeadByBarbourId, isArchivedLeadError } from '../pipedrive/leads.js';
 import { processProject } from './processProject.js';
+import { resetClassificationRun } from './leadClassification.js';
 
 const MAX_LISTED = 25;
 
@@ -138,7 +139,7 @@ export function buildCatchupEmail(s) {
 // Every external call goes through `deps` so the unit tests can run the whole
 // flow against fakes. Production uses these.
 export const defaultDeps = {
-  resetCaches: () => { resetSavedSearchCache(); resetTagCache(); },
+  resetCaches: () => { resetSavedSearchCache(); resetTagCache(); resetClassificationRun(); },
   getSavedSearchByName,
   getProjectsByQuery,
   listLeadBarbourIds,

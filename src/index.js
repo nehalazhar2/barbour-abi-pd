@@ -8,6 +8,7 @@ import { runRefreshSync } from './sync/refreshSync.js';
 import { runBackfillReprocess, parkForever } from './sync/backfillReprocess.js';
 import { resetSavedSearchCache } from './barbourabi/savedSearches.js';
 import { resetTagCache } from './barbourabi/tags.js';
+import { resetClassificationRun } from './sync/leadClassification.js';
 import { runCatchupSync } from './sync/catchupSync.js';
 import { sendBackfillEmail } from './utils/alerts.js';
 
@@ -33,6 +34,7 @@ async function runAll(trigger = 'cron') {
   // edited or deleted in Barbour keeps running as it was at the last deploy.
   resetSavedSearchCache();
   resetTagCache();
+  resetClassificationRun();
 
   try {
     const tagStats = await runTagSync().catch((err) => {

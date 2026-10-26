@@ -11,6 +11,7 @@ import { getProjectsByQuery, getTaggedProjects, getProjectById } from '../barbou
 import { getTagIdByName, ensureTagOnProject } from '../barbourabi/tags.js';
 import { isArchivedLeadError, findLeadByBarbourId, listAllLeads } from '../pipedrive/leads.js';
 import { processProject } from './processProject.js';
+import { resetClassificationRun } from './leadClassification.js';
 
 // One-off re-process of the existing Pipedrive data so records imported before the
 // 16 Sept 2026 rule changes (org-type filter, job-title filter, Role Types field,
@@ -477,6 +478,7 @@ export async function runBackfillReprocess() {
   if (!phases.length) throw new Error('BACKFILL_PHASES has no valid phases (search, refresh)');
 
   const run = { startedAt: Date.now(), phases, currentPhase: null, stats: {} };
+  resetClassificationRun();
   logger.info(`[backfill] starting re-process — phases: ${phases.join(' → ')}; reports every ${config.backfill.reportEveryMinutes}m${config.dryRun ? ' [DRY RUN]' : ''}`);
   await sendProgress(run, 'START');
   const report = makeReporter(run);
