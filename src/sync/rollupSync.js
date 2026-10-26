@@ -56,20 +56,23 @@ export function buildRollups({ leads, deals, orgs, keys, includeDeals, shellComp
   }
   const knownOrgIds = new Set(orgs.map((o) => o.id));
 
-  // One item per Barbour project. A converted Deal wins over a Lead for the
-  // same project (refresh can recreate a lead after conversion — 17 live
-  // cases on 26 Oct); among duplicate leads the lowest id wins.
+  // One item per Barbour project, merged from every record for it (refresh
+  // can recreate a lead after conversion — 15 live cases on 26 Oct):
+  //   shown as: the Deal if there is one, else the lowest-id Lead
+  //   value:    the shown record's value, else the largest other non-zero one
+  //             (converted deals carry no project value — 0/31 live)
+  //   orgs:     the UNION across records (deals rarely carry the Org 1–15
+  //             slots — 1/31 live — so the lead's slot orgs must not be lost)
   const byProject = new Map();
   const consider = (item) => {
     const prev = byProject.get(item.pid);
-    if (!prev) { byProject.set(item.pid, item); return; }
-    if (prev.kind !== item.kind) {
-      stats.leadDealDuplicates += 1;
-      if (item.kind === 'deal') byProject.set(item.pid, item);
-      return;
-    }
-    if (item.kind === 'lead') stats.leadDuplicates += 1;
-    if (String(item.id) < String(prev.id)) byProject.set(item.pid, item);
+    if (!prev) { byProject.set(item.pid, { ...item, orgIds: new Set(item.orgIds), values: [item.value] }); return; }
+    if (prev.kind !== item.kind) stats.leadDealDuplicates += 1;
+    else if (item.kind === 'lead') stats.leadDuplicates += 1;
+    for (const id of item.orgIds) prev.orgIds.add(id);
+    prev.values.push(item.value);
+    const wins = (item.kind === 'deal' && prev.kind === 'lead') || (item.kind === prev.kind && cmpId(item.id, prev.id) < 0);
+    if (wins) { prev.kind = item.kind; prev.id = item.id; prev.title = item.title; prev.value = item.value; }
   };
   const orgIdsOf = (rec, primary) => new Set([primary, ...keys.slots.map((k) => rec[k])].map(orgIdOf).filter(Boolean));
 
@@ -81,13 +84,16 @@ export function buildRollups({ leads, deals, orgs, keys, includeDeals, shellComp
   }
   if (includeDeals) {
     for (const d of deals) {
-      if (!ROLLUP_STATUSES.has(d.status)) continue;
+      if (!ROLLUP_STATUSES.has(d.status) || d.is_archived === true) continue;
       const pid = d[keys.projectId];
       if (!pid) continue;
       consider({ kind: 'deal', id: d.id, title: d.title || '', pid: String(pid), value: projectValue(d, keys, stats), orgIds: orgIdsOf(d, d.org_id) });
     }
   }
 
+  for (const item of byProject.values()) {
+    if (!item.value) item.value = Math.max(0, ...item.values);
+  }
   const rollups = new Map([...eligible.keys()].map((id) => [id, { orgId: id, count: 0, total: 0, items: [] }]));
   for (const item of byProject.values()) {
     if (item.kind === 'lead') stats.leadsUsed += 1; else stats.dealsUsed += 1;
@@ -106,15 +112,31 @@ export function buildRollups({ leads, deals, orgs, keys, includeDeals, shellComp
   return { rollups, stats };
 }
 
+// Locale-independent, numeric-aware id order. This order feeds the content
+// hash, so it must be identical on every machine (localeCompare depends on ICU).
+function cmpId(a, b) {
+  const na = Number(a);
+  const nb = Number(b);
+  if (Number.isFinite(na) && Number.isFinite(nb) && String(na) === String(a) && String(nb) === String(b)) return na - nb;
+  const sa = String(a);
+  const sb = String(b);
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
+
 function byValueThenId(a, b) {
-  return b.value - a.value || String(a.id).localeCompare(String(b.id));
+  return b.value - a.value || cmpId(a.id, b.id);
 }
 
 // 8 hex chars over the data the note shows. Order-independent input, so the
 // same projects always hash the same.
-export function rollupHash(rollup) {
+// Bump when the note's wording/layout changes, so every note is rewritten once.
+const TEMPLATE_VERSION = 1;
+
+export function rollupHash(rollup, { linked = true } = {}) {
   const items = [...rollup.items].sort(byValueThenId).map((i) => [i.kind, String(i.id), i.title, pence(i.value)]);
-  const canon = JSON.stringify([rollup.count, pence(rollup.total), items]);
+  // Links on/off is part of the content: notes written before the app URL was
+  // configured get links as soon as it is.
+  const canon = JSON.stringify([TEMPLATE_VERSION, linked, rollup.count, pence(rollup.total), items]);
   return crypto.createHash('sha1').update(canon).digest('hex').slice(0, 8);
 }
 
@@ -157,7 +179,7 @@ export function renderRollupNote(rollup, { baseUrl }) {
     parts.push(`<ul>${lines.join('')}</ul>`);
     if (items.length > MAX_NOTE_ITEMS) parts.push(`<p>…and ${items.length - MAX_NOTE_ITEMS} more</p>`);
   }
-  parts.push(`<p><i>— ${ROLLUP_MARKER_TEXT} · #${rollupHash(rollup)}</i></p>`);
+  parts.push(`<p><i>— ${ROLLUP_MARKER_TEXT} · #${rollupHash(rollup, { linked: !!base })}</i></p>`);
   return parts.join('');
 }
 
@@ -169,7 +191,7 @@ export function renderRollupNote(rollup, { baseUrl }) {
 //     same orgs. Stateless — survives restarts and deploys.
 //   - Throws if more orgs would drop to zero than any real day produces: that
 //     pattern means a bad read, and writing it would zero the CRM.
-export function planWrites({ rollups, orgs, notesByOrg, cap, dayNumber, massZero }) {
+export function planWrites({ rollups, orgs, notesByOrg, cap, dayNumber, massZero, linked = true }) {
   const orgById = new Map(orgs.map((o) => [o.id, o]));
   const fieldWrites = [];
   const noteWrites = [];
@@ -189,7 +211,7 @@ export function planWrites({ rollups, orgs, notesByOrg, cap, dayNumber, massZero
     const [newest, ...older] = ours;
     let note = null;
     if (newest) {
-      if (noteHash(newest.content) !== rollupHash(r)) note = { action: 'update', noteId: newest.id };
+      if (noteHash(newest.content) !== rollupHash(r, { linked })) note = { action: 'update', noteId: newest.id };
     } else if (r.count > 0) {
       note = { action: 'create', noteId: null };
     }
@@ -205,13 +227,16 @@ export function planWrites({ rollups, orgs, notesByOrg, cap, dayNumber, massZero
     throw new Error(`${zeroDrops} organisation(s) would drop to zero leads in one run (limit ${limit}) — looks like an incomplete read; nothing written`);
   }
 
-  const rotate = (list) => {
+  // Each list advances by the slots it actually gets per day, so notes (which
+  // only get what field writes leave over) are still fully covered in turn.
+  const rotate = (list, perDay) => {
     list.sort((a, b) => a.orgId - b.orgId);
-    if (list.length === 0 || !Number.isFinite(cap)) return list;
-    const offset = (dayNumber * cap) % list.length;
+    if (list.length === 0 || !Number.isFinite(cap) || perDay <= 0) return list;
+    const offset = (dayNumber * perDay) % list.length;
     return [...list.slice(offset), ...list.slice(0, offset)];
   };
-  const ordered = [...rotate(fieldWrites), ...rotate(noteWrites)];
+  const noteSlots = Number.isFinite(cap) ? Math.max(0, cap - fieldWrites.length) : Infinity;
+  const ordered = [...rotate(fieldWrites, cap), ...rotate(noteWrites, noteSlots)];
   const writes = Number.isFinite(cap) ? ordered.slice(0, cap) : ordered;
   return { writes, candidates: ordered.length, stale: ordered.length - writes.length, zeroDrops };
 }
@@ -251,6 +276,9 @@ export async function runRollupSync(deps = defaultDeps, opts = optsFromConfig())
     logger.info('[rollupSync] off (PD_FIELD_ORG_ROLLUP_VALUE / _COUNT not set)');
     return { skipped: true };
   }
+  if (opts.valueKey === opts.countKey) {
+    throw new Error('PD_FIELD_ORG_ROLLUP_VALUE and PD_FIELD_ORG_ROLLUP_COUNT are the same key — one would overwrite the other');
+  }
   const start = deps.now();
   logger.info(`[rollupSync] starting — cap ${opts.maxWrites}, deals ${opts.includeDeals ? 'included' : 'excluded'}${opts.dryRun ? ' [DRY RUN]' : ''}`);
   if (!opts.baseUrl) logger.warn('[rollupSync] PIPEDRIVE_APP_BASE_URL not set — notes will list titles without links');
@@ -275,6 +303,7 @@ export async function runRollupSync(deps = defaultDeps, opts = optsFromConfig())
     cap: opts.maxWrites,
     dayNumber: Math.floor(start / DAY_MS),
     massZero: { min: 50, pct: 0.05 },
+    linked: !!opts.baseUrl,
   });
 
   const result = { orgs: rollups.size, candidates, written: 0, failed: 0, stale, zeroDrops, ...stats };

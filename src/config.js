@@ -323,9 +323,12 @@ export const config = {
     // Converted Deals count toward the roll-up (our recommendation; Wrekin to
     // confirm — see docs/builds/2026-10-26-phase2-A1.md).
     includeDeals: (process.env.ROLLUP_INCLUDE_DEALS || 'true').trim().toLowerCase() !== 'false',
-    maxWrites: parseNonNegativeInt('ROLLUP_MAX_WRITES', 1500),
-    // Below this many Barbour leads the lead read is treated as incomplete.
-    minLeads: parseNonNegativeInt('ROLLUP_MIN_LEADS', 5000),
+    // 0 = unlimited (same convention as MAX_PROJECTS_PER_SYNC) — A4 uses that.
+    maxWrites: parseNonNegativeInt('ROLLUP_MAX_WRITES', 1500) || Infinity,
+    // Below this many Barbour leads the lead read is treated as incomplete and
+    // nothing is written. ~7,530 live on 26 Oct — keep this close to the real
+    // count (retune as the CRM grows); a loose floor lets a short read through.
+    minLeads: parseNonNegativeInt('ROLLUP_MIN_LEADS', 7000),
   },
   dryRun: (process.env.DRY_RUN || '').toLowerCase() === 'true',
   // Optional safety cap — applied per sync (tag-sync and filter-sync each get up to N).

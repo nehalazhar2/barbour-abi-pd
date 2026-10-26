@@ -342,3 +342,65 @@ test('runRollup: deals not read when includeDeals is false', async () => {
   await runRollupSync(deps, ropts({ includeDeals: false }));
   assert.equal(dealReads, 0);
 });
+
+// ---------------------------------------------------------------------------
+// Code-review fixes (A1 T5)
+// ---------------------------------------------------------------------------
+
+test('rollup: converted project keeps the lead value and every slot org', () => {
+  const { rollups } = buildRollups({
+    leads: [lead('L1', 300, 5000, 1, [1, 2, 3])],
+    deals: [{ id: 7, title: 'Converted', status: 'open', pid: '300', bpv: null, org_id: { value: 4 } }],
+    orgs: [org(1), org(2), org(3), org(4)], keys: K, includeDeals: true, shellCompanyId: '0',
+  });
+  for (const id of [1, 2, 3, 4]) {
+    assert.equal(rollups.get(id).count, 1, `org ${id}`);
+    assert.equal(rollups.get(id).total, 5000, `org ${id} value from the lead`);
+    assert.equal(rollups.get(id).items[0].kind, 'deal', 'shown as the deal');
+  }
+});
+
+test('rollup: duplicate leads union their orgs', () => {
+  const { rollups } = build({ leads: [lead('L2', 300, 10, 2), lead('L1', 300, 10, 1)] });
+  assert.equal(rollups.get(1).count, 1);
+  assert.equal(rollups.get(2).count, 1);
+});
+
+test('rollup: archived deals are excluded', () => {
+  const { rollups } = build({ deals: [{ id: 7, title: 'D', status: 'open', pid: '200', org_id: 1, is_archived: true }] });
+  assert.equal(rollups.get(1).count, 0);
+});
+
+test('note ordering: numeric ids compare numerically, locale-free', () => {
+  const r = rollupOf([{ kind: 'deal', id: 10, title: 'Ten', value: 1 }, { kind: 'deal', id: 9, title: 'Nine', value: 1 }]);
+  const html = renderRollupNote(r, { baseUrl: 'https://x' });
+  assert.ok(html.indexOf('Nine') < html.indexOf('Ten'));
+});
+
+test('hash: links on/off and template are part of the content', () => {
+  const r = rollupOf([{ kind: 'lead', id: 'a', title: 'A', value: 1 }]);
+  assert.notEqual(rollupHash(r, { linked: true }), rollupHash(r, { linked: false }));
+  const plain = renderRollupNote(r, { baseUrl: '' });
+  assert.equal(noteHash(plain), rollupHash(r, { linked: false }));
+  const { writes } = plan({ linked: true, rollups: new Map([[1, R(1, [item('a')])]]), orgs: [org(1, 'B1', { count: 1, value: 100 })], notesByOrg: new Map([[1, [{ id: 10, content: renderRollupNote(R(1, [item('a')]), { baseUrl: '' }), update_time: 'x' }]]]) });
+  assert.equal(writes[0].note.action, 'update', 'plain note gains links once the URL is set');
+});
+
+test('plan: notes are fully covered even when field writes take part of the cap', () => {
+  const fieldIds = [1, 2, 3];
+  const noteIds = [10, 11, 12, 13, 14, 15];
+  const rollups = new Map([...fieldIds, ...noteIds].map((id) => [id, R(id, [{ ...item(`x${id}`), title: 'new' }])]));
+  const orgs = [...fieldIds.map((id) => org(id, `B${id}`, { count: 9, value: 9 })), ...noteIds.map((id) => org(id, `B${id}`, { count: 1, value: 100 }))];
+  const notesByOrg = new Map(noteIds.map((id) => [id, [storedNote(id * 10, R(id, [item(`x${id}`)]))]]));
+  const seen = new Set();
+  for (let day = 0; day < 3; day += 1) {
+    for (const w of plan({ cap: 5, dayNumber: day, rollups, orgs, notesByOrg }).writes) if (!w.fields) seen.add(w.orgId);
+  }
+  assert.equal(seen.size, noteIds.length, 'remaining = 2 slots/day → 6 notes in 3 days');
+});
+
+test('runRollup: identical value and count keys are refused', async () => {
+  const { deps, calls } = rollupWorld({ leads: [lead('L1', 100, 5, 1)] });
+  await assert.rejects(runRollupSync(deps, ropts({ valueKey: 'same', countKey: 'same' })), /same key/);
+  assert.equal(calls.reads, 0);
+});
