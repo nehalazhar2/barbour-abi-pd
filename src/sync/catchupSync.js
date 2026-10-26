@@ -14,6 +14,15 @@
 //
 // Build log and design review: docs/builds/2026-10-26-weekly-catchup.md
 
+import { config } from '../config.js';
+import { logger } from '../utils/logger.js';
+import { sendBackfillEmail } from '../utils/alerts.js';
+import { getSavedSearchByName, resetSavedSearchCache } from '../barbourabi/savedSearches.js';
+import { getProjectsByQuery, getTaggedProjects, getProjectById } from '../barbourabi/projects.js';
+import { getTagIdByName, getProjectTags, ensureTagOnProject, resetTagCache } from '../barbourabi/tags.js';
+import { listLeadBarbourIds, findLeadByBarbourId, isArchivedLeadError } from '../pipedrive/leads.js';
+import { processProject } from './processProject.js';
+
 const MAX_LISTED = 25;
 
 // Pure. Which search-matched projects have neither a Lead nor the CRM tag.
@@ -111,4 +120,202 @@ export function buildCatchupEmail(s) {
     }
   }
   return { subject, text: L.join('\n') };
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration
+// ---------------------------------------------------------------------------
+
+// Every external call goes through `deps` so the unit tests can run the whole
+// flow against fakes. Production uses these.
+export const defaultDeps = {
+  resetCaches: () => { resetSavedSearchCache(); resetTagCache(); },
+  getSavedSearchByName,
+  getProjectsByQuery,
+  listLeadBarbourIds,
+  getTagIdByName,
+  getTaggedProjects,
+  getProjectTags,
+  findLeadByBarbourId,
+  getProjectById,
+  processProject,
+  ensureTagOnProject,
+  isArchivedLeadError,
+  sendEmail: sendBackfillEmail, // already a no-op under DRY_RUN
+  now: Date.now,
+};
+
+export function optsFromConfig() {
+  return {
+    searchNames: config.barbourabi.savedSearchNames,
+    crmTagName: config.barbourabi.crmTagName,
+    addToCrmTagName: config.barbourabi.addToCrmTagName,
+    maxCreates: config.catchup.maxCreates,
+    maxProjects: config.maxProjectsPerSync,
+    maxRuntimeMs: config.catchup.maxRuntimeMinutes * 60 * 1000,
+    dryRun: config.dryRun,
+    alertEmails: config.catchup.alertEmails,
+  };
+}
+
+const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+const isDeleted = (lead) => lead?.is_deleted === true || lead?.active_flag === false;
+
+export async function runCatchupSync(deps = defaultDeps, opts = optsFromConfig()) {
+  const start = deps.now();
+  const s = {
+    dryRun: opts.dryRun,
+    searches: [...opts.searchNames],
+    searchesFailed: [],
+    matched: 0,
+    inPd: 0,
+    taggedNoLead: 0,
+    candidates: 0,
+    maxCreates: opts.maxCreates,
+    held: false,
+    heldPids: [],
+    created: 0,
+    createdList: [],
+    onCrmTag: 0,
+    onAddToCrm: 0,
+    foundOnRecheck: 0,
+    deletedInPd: [],
+    archived: [],
+    failed: 0,
+    failures: [],
+    budgetStopped: false,
+    remaining: 0,
+    elapsedMs: 0,
+  };
+  if (!opts.searchNames.length) throw new Error('BARBOURABI_SAVED_SEARCH_NAMES not set');
+  logger.info(`[catchupSync] starting — ${opts.searchNames.length} saved search(es), NO lookback; hold above ${opts.maxCreates}${opts.dryRun ? ' [DRY RUN]' : ''}`);
+
+  // Fresh search definitions and tag ids — the worker is long-lived.
+  deps.resetCaches();
+
+  // 1. Full match set per search. One bad search doesn't stop the rest.
+  const searchesByProject = new Map();
+  for (const name of opts.searchNames) {
+    try {
+      const ss = await deps.getSavedSearchByName(name);
+      const rows = await deps.getProjectsByQuery(ss.query || {});
+      if (rows.truncated) throw new Error(`listing truncated at ${rows.length} rows — not safe to act on`);
+      logger.info(`[catchupSync] "${name}" matched ${rows.length} project(s)`);
+      for (const p of rows) {
+        const pid = Number(p?.project_id);
+        if (!pid) continue;
+        const list = searchesByProject.get(pid) || [];
+        if (!list.includes(name)) list.push(name);
+        searchesByProject.set(pid, list);
+      }
+    } catch (err) {
+      s.searchesFailed.push({ name, err: err.message });
+      logger.error(`[catchupSync] saved search "${name}" failed: ${err.message}`);
+    }
+  }
+  if (s.searchesFailed.length === opts.searchNames.length) {
+    throw new Error(`every saved search failed: ${s.searchesFailed.map((f) => `"${f.name}": ${f.err}`).join('; ')}`);
+  }
+  s.matched = searchesByProject.size;
+
+  // 2 + 3. What's already in Pipedrive / already imported. Never act on a
+  // partial picture — any doubt here throws, and the caller alerts.
+  const leadPids = await deps.listLeadBarbourIds();
+  const crmTagId = await deps.getTagIdByName(opts.crmTagName);
+  const taggedRows = await deps.getTaggedProjects(crmTagId);
+  if (taggedRows.truncated) throw new Error(`"${opts.crmTagName}" tag listing truncated at ${taggedRows.length} rows`);
+  const crmTaggedPids = new Set(taggedRows.map((p) => Number(p?.project_id)).filter(Boolean));
+  if (crmTaggedPids.size === 0) throw new Error(`"${opts.crmTagName}" tag listing came back empty`);
+  if (leadPids.size < crmTaggedPids.size * 0.5) {
+    throw new Error(`lead index looks incomplete: ${leadPids.size} leads vs ${crmTaggedPids.size} CRM-tagged projects`);
+  }
+
+  // 4. Candidates.
+  const sel = selectCandidates({ searchesByProject, leadPids, crmTaggedPids });
+  s.inPd = sel.inPd;
+  s.taggedNoLead = sel.taggedNoLead.length;
+  s.candidates = sel.candidates.length;
+  logger.info(`[catchupSync] matched=${s.matched} inPd=${s.inPd} taggedNoLead=${s.taggedNoLead} candidates=${s.candidates}`);
+
+  // 5. Hold: a jump this big means a search was edited. Decide with the client
+  // first — create nothing, make no per-project calls.
+  if (s.candidates > opts.maxCreates) {
+    s.held = true;
+    s.heldPids = sel.candidates.map((c) => c.pid);
+    logger.warn(`[catchupSync] HELD — ${s.candidates} candidates exceed CATCHUP_MAX_CREATES=${opts.maxCreates}; nothing created`);
+    return finish(s, deps, opts, start);
+  }
+
+  // 6. Smoke-test cap.
+  let work = sel.candidates;
+  if (opts.maxProjects > 0 && work.length > opts.maxProjects) {
+    logger.warn(`[catchupSync] capping ${work.length} → ${opts.maxProjects} (MAX_PROJECTS_PER_SYNC)`);
+    work = work.slice(0, opts.maxProjects);
+  }
+
+  // 7. Per candidate: re-check, then import.
+  for (let i = 0; i < work.length; i += 1) {
+    const { pid, searches } = work[i];
+    if (opts.maxRuntimeMs > 0 && deps.now() - start >= opts.maxRuntimeMs) {
+      s.budgetStopped = true;
+      s.remaining = work.length - i;
+      logger.warn(`[catchupSync] runtime limit reached — ${s.remaining} candidate(s) left for next run`);
+      break;
+    }
+    try {
+      // Its own tags — the bulk listing can miss rows.
+      const tags = await deps.getProjectTags(pid);
+      if (tags.some((t) => t.tag_id === crmTagId || sameName(t.tag_name, opts.crmTagName))) {
+        s.onCrmTag += 1;
+        continue;
+      }
+      if (tags.some((t) => sameName(t.tag_name, opts.addToCrmTagName))) {
+        s.onAddToCrm += 1; // tag-sync will import it at 07:00 with the right owner + label
+        continue;
+      }
+      // The lead list omits archived (and deleted) leads — ask by id.
+      const { lead } = await deps.findLeadByBarbourId(pid, { includeDeleted: true });
+      if (lead) {
+        if (isDeleted(lead)) s.deletedInPd.push({ pid, title: lead.title });
+        else if (lead.is_archived) s.archived.push({ pid, title: lead.title });
+        else s.foundOnRecheck += 1;
+        continue;
+      }
+
+      const project = await deps.getProjectById(pid);
+      if (!project) throw new Error('project not found on Barbour');
+      const result = await deps.processProject(project, { source: 'filter', matchedSearches: searches });
+      if (result?.created) {
+        s.created += 1;
+        s.createdList.push({ pid, title: project.project_title });
+        logger.info(`[catchupSync] created lead for ${pid} "${project.project_title || ''}" [${searches.join(', ')}]`);
+      } else {
+        // processProject found a lead the recheck didn't (e.g. via the legacy
+        // field) and updated it. Not a new lead — don't report it as one.
+        s.foundOnRecheck += 1;
+        logger.info(`[catchupSync] ${pid} already had a lead — updated, not created`);
+      }
+      // Same as the daily filter sync: the CRM tag keeps refresh tracking it.
+      await deps.ensureTagOnProject(pid, crmTagId);
+    } catch (err) {
+      if (deps.isArchivedLeadError(err)) {
+        s.archived.push({ pid, title: err.leadTitle });
+        logger.warn(`[catchupSync] ${pid} — PD lead is archived, skipped`);
+      } else {
+        s.failed += 1;
+        s.failures.push({ pid, err: err.message });
+        logger.error(`[catchupSync] project ${pid} failed: ${err.message}`);
+      }
+    }
+  }
+  return finish(s, deps, opts, start);
+}
+
+async function finish(s, deps, opts, start) {
+  s.elapsedMs = deps.now() - start;
+  const { subject, text } = buildCatchupEmail(s);
+  await deps.sendEmail({ to: opts.alertEmails, subject, text });
+  const { createdList, heldPids, ...brief } = s;
+  logger.info(`[catchupSync] finished in ${(s.elapsedMs / 1000).toFixed(1)}s — ${JSON.stringify({ ...brief, heldPids: heldPids.length })}`);
+  return s;
 }
