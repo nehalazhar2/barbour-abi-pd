@@ -4,7 +4,7 @@ import { getRolesForProject } from '../barbourabi/roles.js';
 import { getSectorName, resolveMaterialNames } from '../barbourabi/lookups.js';
 import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
 import { upsertOrg, updateOrg } from '../pipedrive/organisations.js';
-import { upsertPerson, updatePerson, mergeLabelIds } from '../pipedrive/persons.js';
+import { makePersonUpserter, contactLabelIds } from '../pipedrive/persons.js';
 import { upsertLead, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
 import { buildClassificationFields } from './leadClassification.js';
@@ -122,6 +122,21 @@ function pickPrimaryContactRole(roles, primaryName, preference = []) {
   return firstPersonlessMatch;
 }
 
+// Phase 2 / A2 contact labels. On only when both label ids are configured;
+// otherwise the legacy behaviour (company walk adds PoOP) is unchanged.
+const contactLabelCfg = {
+  primary: config.pipedrive.personLabels?.primary,
+  company: config.pipedrive.personLabels?.company,
+  legacy: config.pipedrive.personLabels?.peopleOnOtherProjects ?? config.pipedrive.personLabels?.company,
+};
+const contactLabelsOn = contactLabelCfg.primary != null && contactLabelCfg.company != null;
+if ((contactLabelCfg.primary != null) !== (contactLabelCfg.company != null)) {
+  logger.warn('[process] only one of PD_LABEL_PERSON_PRIMARY / PD_LABEL_PERSON_COMPANY is set — contact labels stay on legacy PoOP behaviour until both are');
+}
+function contactLabelOpts(kind) {
+  return contactLabelsOn ? { labelsFor: (current) => contactLabelIds(current, kind, contactLabelCfg) } : {};
+}
+
 export async function processProject(project, { ownerId, source, preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null } = {}) {
   const projectId = project.project_id;
   const projectTitle = project.project_title || `Barbour project ${projectId}`;
@@ -174,6 +189,13 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   // substring match. Empty list → include all. `readJobTitle` unifies the two
   // person shapes we see: role-normalised (job_title) vs PoOP raw
   // (person_job_title / person_title).
+  // Phase 2 / A2 — every Barbour person named on this project, captured BEFORE
+  // the title filter below. A named contact whose role record fails the title
+  // check can still turn up in the company walk; they must be labelled
+  // Primary there, never Company.
+  const namedPersonIds = new Set(
+    roles.flatMap((r) => (r.persons || []).map((p) => p?.person_id).filter((id) => id != null)).map(String),
+  );
   const approvedTitles = config.pipedrive.approvedContactJobTitles || [];
   const readJobTitle = (p) => p?.job_title || p?.person_job_title || p?.person_title || '';
   const jobTitleAllowed = (title) => {
@@ -211,25 +233,10 @@ export async function processProject(project, { ownerId, source, preserveOwner =
 
   const orgByBarbourCompanyId = {};
   const personByBarbourCompanyId = {};
-  // Cache of Barbour person id → full PD person object seen this project.
-  // Same person can appear across the roles loop AND the PoOP loop (or twice
-  // in one roles loop if same person is on multiple roles). Second and later
-  // calls short-circuit search (which lags fresh creates by seconds → dupes)
-  // and go straight to updatePerson using the cached id.
-  const pdPersonByBarbourPersonId = {};
-  const upsertPersonDeduped = async (person, orgId, opts = {}) => {
-    const bid = person?.person_id;
-    if (bid && pdPersonByBarbourPersonId[bid]) {
-      const cached = pdPersonByBarbourPersonId[bid];
-      const labelIds = mergeLabelIds(cached, opts.addLabelId);
-      const updated = await updatePerson(cached.id, person, orgId, { labelIds });
-      if (updated) pdPersonByBarbourPersonId[bid] = updated;
-      return updated || cached;
-    }
-    const p = await upsertPerson(person, orgId, opts);
-    if (p?.id && bid) pdPersonByBarbourPersonId[bid] = p;
-    return p;
-  };
+  // Per-project person upserter: the same Barbour person can appear in the
+  // roles loop AND the company walk; later calls reuse the first one's id and
+  // known labels (see makePersonUpserter).
+  const upsertPersonDeduped = makePersonUpserter();
   for (const role of roles) {
     try {
       // Same-project multi-role dedup: if we already resolved a PD org for this
@@ -242,7 +249,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
       if (org?.id) orgByBarbourCompanyId[role.company_id] = org.id;
       for (const person of role.persons || []) {
         try {
-          const p = await upsertPersonDeduped(person, org?.id);
+          const p = await upsertPersonDeduped(person, org?.id, contactLabelOpts('primary'));
           if (p?.id && !personByBarbourCompanyId[role.company_id]) {
             personByBarbourCompanyId[role.company_id] = p.id;
           }
@@ -292,7 +299,9 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   // label. They are NOT promoted to the lead's primary Person — that stays as
   // whatever real project contact Barbour gave us (or nothing).
   const poopLabelId = config.pipedrive.personLabels?.peopleOnOtherProjects;
-  if (!usingShellOrg && poopLabelId) {
+  // With A2 labels on, the walk runs on the Company Contact label even if the
+  // legacy PoOP var is cleared.
+  if (!usingShellOrg && (contactLabelsOn || poopLabelId)) {
     const maxPerOrg = config.pipedrive.peopleOnOtherProjectsMax;
     // Dedup by company_id — same company can appear under multiple roles
     // (e.g. Anglian Water as both Client and Architect) and we don't want to
@@ -317,7 +326,11 @@ export async function processProject(project, { ownerId, source, preserveOwner =
       );
       for (const p of slice) {
         try {
-          await upsertPersonDeduped(normalisePerson(p), pdOrgId, { addLabelId: poopLabelId });
+          const np = normalisePerson(p);
+          const opts = contactLabelsOn
+            ? contactLabelOpts(np?.person_id != null && namedPersonIds.has(String(np.person_id)) ? 'primary' : 'company')
+            : { addLabelId: poopLabelId };
+          await upsertPersonDeduped(np, pdOrgId, opts);
         } catch (err) {
           logger.warn(
             `[process] PoOP upsert failed for ${p.person_first_name || ''} ${p.person_last_name || ''} at ${role.company_name}: ${err.message}`,

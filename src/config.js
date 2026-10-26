@@ -224,6 +224,12 @@ export const config = {
       peopleOnOtherProjects: process.env.PD_LABEL_PERSON_POOP
         ? Number(process.env.PD_LABEL_PERSON_POOP)
         : undefined,
+      // Phase 2 / A2. Both set → named project contacts get Primary Contact,
+      // company-staff contacts get Company Contact (never both; Primary wins).
+      // If Wrekin renames the PoOP label (1066) to "Company Contact", set
+      // COMPANY to 1066. Either unset → legacy PoOP behaviour.
+      primary: process.env.PD_LABEL_PERSON_PRIMARY ? Number(process.env.PD_LABEL_PERSON_PRIMARY) : undefined,
+      company: process.env.PD_LABEL_PERSON_COMPANY ? Number(process.env.PD_LABEL_PERSON_COMPANY) : undefined,
     },
     // Safety ceiling per org for PoOP upserts. Ben's job-title filter usually keeps
     // this well below the cap; it only fires as a runaway backstop.

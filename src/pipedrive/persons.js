@@ -134,35 +134,102 @@ export async function updatePerson(personId, person, orgId, opts = {}) {
 // Merge an addLabelId (single option id) with an existing person's label_ids to
 // avoid clobbering user-applied labels on updates. Returns undefined when no
 // label add is requested, so callers can pass through unchanged.
+// NOTE: only safe when existingPerson.label_ids is the TRUE current set — see
+// currentLabelIds. Kept for compatibility; new code uses nextLabelIds.
 export function mergeLabelIds(existingPerson, addLabelId) {
   if (!addLabelId) return undefined;
   const existing = Array.isArray(existingPerson?.label_ids) ? existingPerson.label_ids : [];
   return Array.from(new Set([...existing, addLabelId]));
 }
 
-export async function upsertPerson(person, orgId, { addLabelId } = {}) {
-  if (!person) return null;
+// ---------------------------------------------------------------------------
+// Contact labels (Phase 2 / A2) — and the user-label protection they need
+// ---------------------------------------------------------------------------
+// PD v2 label_ids REPLACES the person's labels. Person SEARCH results carry no
+// label_ids at all (measured 26 Oct 2026), so building the new set from a
+// search hit silently wiped Wrekin's own labels on adoption. Every label write
+// now starts from the person's TRUE current labels; if those can't be read,
+// the labels are left alone.
+
+const sortIds = (ids) => [...new Set(ids.map(Number))].sort((a, b) => a - b);
+const sameSet = (a, b) => a.length === b.length && sortIds(a).every((x, i) => x === sortIds(b)[i]);
+
+// Pure. cfg = { primary, company, legacy } (label option ids). legacy is the
+// old PoOP id; equal to company when Wrekin renamed 1066 to "Company Contact".
+// Returns the new set, or undefined when it wouldn't change.
+export function contactLabelIds(current, kind, cfg) {
+  const cur = sortIds(current || []);
+  const drop = new Set([cfg.company, cfg.legacy].filter((x) => x != null));
+  let next;
+  if (kind === 'primary') {
+    next = [...cur.filter((x) => !drop.has(x)), cfg.primary];
+  } else if (cur.includes(cfg.primary)) {
+    // Primary on any project stays Primary — never both labels.
+    next = cur.filter((x) => !drop.has(x));
+  } else {
+    next = [...cur.filter((x) => x !== cfg.legacy), cfg.company];
+  }
+  next = sortIds(next);
+  return sameSet(next, cur) ? undefined : next;
+}
+
+async function getPersonById(personId) {
+  const res = await requestV2({ method: 'GET', url: `/persons/${personId}` }, { label: 'pd-getPerson' });
+  return res.data?.data;
+}
+
+// The person's true current label ids, or null when unknown (fetch failed,
+// or a DRY_RUN fake id) — null means "don't touch labels".
+export async function currentLabelIds(person, { fetchPerson = getPersonById } = {}) {
+  if (!person?.id) return null;
+  if (Array.isArray(person.label_ids)) return person.label_ids;
+  if (String(person.id).startsWith('dry-run')) return null;
+  try {
+    const full = await fetchPerson(person.id);
+    return Array.isArray(full?.label_ids) ? full.label_ids : [];
+  } catch (err) {
+    logger.warn(`[pd-person] could not read labels for person ${person.id} — leaving labels unchanged: ${err.message}`);
+    return null;
+  }
+}
+
+// What label_ids to send (undefined = leave them alone). `current` null means
+// unknown → never send a set built on a guess.
+export function nextLabelIds(current, { addLabelId, labelsFor } = {}) {
+  if (!addLabelId && !labelsFor) return undefined;
+  if (current == null) return undefined;
+  if (labelsFor) return labelsFor(current);
+  const merged = sortIds([...current, addLabelId]);
+  return sameSet(merged, current) ? undefined : merged;
+}
+
+// Same as upsertPerson, but also reports which labels were sent and which are
+// now known to be on the person — the per-project cache needs that, because
+// under DRY_RUN the write response is a fake with no labels.
+export async function upsertPersonWithLabels(person, orgId, opts = {}) {
+  if (!person) return { person: null, labelIdsSent: undefined, labelIdsKnown: null };
   const hasName = !!(person.first_name || person.last_name);
   // Nothing to key on — skip. Would just create a nameless "Unknown" row.
-  if (!person.person_id && !person.email && !hasName) return null;
+  if (!person.person_id && !person.email && !hasName) return { person: null, labelIdsSent: undefined, labelIdsKnown: null };
+
+  const adopt = async (existing, how) => {
+    if (how) logger.info(`[pd-person] adopting existing person ${existing.id} ${how}`);
+    else logger.debug(`[pd-person] updating person ${existing.id}`);
+    const cur = await currentLabelIds(existing);
+    const sent = nextLabelIds(cur, opts);
+    const resp = await updatePerson(existing.id, person, orgId, { labelIds: sent });
+    return { person: { ...(resp || {}), id: existing.id }, labelIdsSent: sent, labelIdsKnown: sent ?? cur };
+  };
 
   // 1. Fast path: dedup by Barbour person ID.
   if (person.person_id) {
     const existing = await findPersonByBarbourId(person.person_id);
-    if (existing?.id) {
-      logger.debug(`[pd-person] updating person ${existing.id}`);
-      return updatePerson(existing.id, person, orgId, { labelIds: mergeLabelIds(existing, addLabelId) });
-    }
+    if (existing?.id) return adopt(existing);
   }
   // 2. Email match — adopts persons the client's team created manually.
   if (person.email) {
     const byEmail = await findPersonByExactEmail(person.email);
-    if (byEmail?.id) {
-      logger.info(
-        `[pd-person] adopting existing person ${byEmail.id} for "${person.email}" by email match`,
-      );
-      return updatePerson(byEmail.id, person, orgId, { labelIds: mergeLabelIds(byEmail, addLabelId) });
-    }
+    if (byEmail?.id) return adopt(byEmail, `for "${person.email}" by email match`);
   }
   // 3. Name + org match — covers Barbour persons that arrive without an email
   //    (very common). Only tried when the org has already been resolved so the
@@ -170,13 +237,36 @@ export async function upsertPerson(person, orgId, { addLabelId } = {}) {
   if (hasName && orgId) {
     const name = fullName(person);
     const byNameOrg = await findPersonByNameAndOrg(name, orgId);
-    if (byNameOrg?.id) {
-      logger.info(
-        `[pd-person] adopting existing person ${byNameOrg.id} for "${name}" @ org ${orgId} by name+org match`,
-      );
-      return updatePerson(byNameOrg.id, person, orgId, { labelIds: mergeLabelIds(byNameOrg, addLabelId) });
-    }
+    if (byNameOrg?.id) return adopt(byNameOrg, `for "${name}" @ org ${orgId} by name+org match`);
   }
   logger.debug(`[pd-person] creating person ${fullName(person)}`);
-  return createPerson(person, orgId, { labelIds: addLabelId ? [addLabelId] : undefined });
+  const sent = nextLabelIds([], opts);
+  const created = await createPerson(person, orgId, { labelIds: sent });
+  return { person: created, labelIdsSent: sent, labelIdsKnown: sent ?? [] };
+}
+
+export async function upsertPerson(person, orgId, opts = {}) {
+  return (await upsertPersonWithLabels(person, orgId, opts)).person;
+}
+
+// Per-project upserter. The same Barbour person can appear in the roles loop
+// AND the company walk (or twice in the roles loop). Second and later calls
+// skip search (which lags fresh creates → dupes) and update by the cached id.
+// The cache holds the REAL id and the labels we computed — never the write
+// response, which under DRY_RUN is a fake id with no labels.
+export function makePersonUpserter({ upsert = upsertPersonWithLabels, update = updatePerson } = {}) {
+  const cache = new Map();
+  return async (person, orgId, opts = {}) => {
+    const bid = person?.person_id;
+    const cached = bid ? cache.get(bid) : null;
+    if (cached) {
+      const sent = nextLabelIds(cached.label_ids, opts);
+      const resp = await update(cached.id, person, orgId, { labelIds: sent });
+      cache.set(bid, { id: cached.id, label_ids: sent ?? cached.label_ids });
+      return { ...(resp || {}), id: cached.id };
+    }
+    const r = await upsert(person, orgId, opts);
+    if (r?.person?.id && bid) cache.set(bid, { id: r.person.id, label_ids: r.labelIdsKnown });
+    return r?.person ?? null;
+  };
 }
