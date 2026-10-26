@@ -90,7 +90,8 @@ export function buildCatchupEmail(s) {
       '',
       'To import them: on DigitalOcean set CATCHUP_MAX_CREATES above the count and',
       'CATCHUP_RUN_ON_START=true (both app and component level), redeploy, then',
-      'remove CATCHUP_RUN_ON_START once the run finishes.',
+      'remove CATCHUP_RUN_ON_START once the run finishes. Then put CATCHUP_MAX_CREATES',
+      'back to its usual value (200) — left raised, it switches off this safeguard.',
       '',
       `First ${Math.min(MAX_LISTED, s.heldPids.length)} Barbour project ids:`,
       ...listPids(s.heldPids, (pid) => pid),
@@ -105,8 +106,16 @@ export function buildCatchupEmail(s) {
     if (s.createdList.length) {
       L.push('New leads:', ...listPids(s.createdList, (c) => `${c.pid}  ${c.title || ''}`), '');
     }
+    if (s.tagFailed.length) {
+      L.push('⚠ Created but the CRM tag could not be added in Barbour — add it by hand, or the daily',
+        'refresh won\'t track these and a later deletion could be re-imported:',
+        ...listPids(s.tagFailed, (x) => `${x.pid}  ${x.title || ''}`), '');
+    }
+    if (s.capped) {
+      L.push(`⚠ MAX_PROJECTS_PER_SYNC is set: ${s.capped} candidate(s) were left out of this run. Unset it on DO if this isn't a test.`, '');
+    }
     if (s.budgetStopped) {
-      L.push(`⏳ Stopped at the runtime limit with ${s.remaining} candidate(s) still to import.`,
+      L.push(`⏳ Stopped at the runtime limit (or before the 07:00 daily run) with ${s.remaining} candidate(s) still to import.`,
         'They will be picked up next week, or set CATCHUP_RUN_ON_START=true to continue sooner.', '');
     }
     if (s.deletedInPd.length) {
@@ -158,6 +167,15 @@ export function optsFromConfig() {
   };
 }
 
+// The daily run starts at 07:00 London and shares the lock — a long catch-up
+// must hand it back rather than make the daily run skip. 06:30–07:59 is off
+// limits for starting another project (each takes ~20–90s).
+const LONDON_HM = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+export function nearDailyRun(ms) {
+  const [h, m] = LONDON_HM.format(new Date(ms)).split(':').map(Number);
+  return (h === 6 && m >= 30) || h === 7;
+}
+
 const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
 const isDeleted = (lead) => lead?.is_deleted === true || lead?.active_flag === false;
 
@@ -183,6 +201,8 @@ export async function runCatchupSync(deps = defaultDeps, opts = optsFromConfig()
     archived: [],
     failed: 0,
     failures: [],
+    tagFailed: [],
+    capped: 0,
     budgetStopped: false,
     remaining: 0,
     elapsedMs: 0,
@@ -250,13 +270,14 @@ export async function runCatchupSync(deps = defaultDeps, opts = optsFromConfig()
   let work = sel.candidates;
   if (opts.maxProjects > 0 && work.length > opts.maxProjects) {
     logger.warn(`[catchupSync] capping ${work.length} → ${opts.maxProjects} (MAX_PROJECTS_PER_SYNC)`);
+    s.capped = work.length - opts.maxProjects;
     work = work.slice(0, opts.maxProjects);
   }
 
   // 7. Per candidate: re-check, then import.
   for (let i = 0; i < work.length; i += 1) {
     const { pid, searches } = work[i];
-    if (opts.maxRuntimeMs > 0 && deps.now() - start >= opts.maxRuntimeMs) {
+    if ((opts.maxRuntimeMs > 0 && deps.now() - start >= opts.maxRuntimeMs) || nearDailyRun(deps.now())) {
       s.budgetStopped = true;
       s.remaining = work.length - i;
       logger.warn(`[catchupSync] runtime limit reached — ${s.remaining} candidate(s) left for next run`);
@@ -274,7 +295,7 @@ export async function runCatchupSync(deps = defaultDeps, opts = optsFromConfig()
         continue;
       }
       // The lead list omits archived (and deleted) leads — ask by id.
-      const { lead } = await deps.findLeadByBarbourId(pid, { includeDeleted: true });
+      const { lead } = await deps.findLeadByBarbourId(pid, { includeDeleted: true, strict: true });
       if (lead) {
         if (isDeleted(lead)) s.deletedInPd.push({ pid, title: lead.title });
         else if (lead.is_archived) s.archived.push({ pid, title: lead.title });
@@ -295,8 +316,16 @@ export async function runCatchupSync(deps = defaultDeps, opts = optsFromConfig()
         s.foundOnRecheck += 1;
         logger.info(`[catchupSync] ${pid} already had a lead — updated, not created`);
       }
-      // Same as the daily filter sync: the CRM tag keeps refresh tracking it.
-      await deps.ensureTagOnProject(pid, crmTagId);
+      // Same as the daily filter sync: the CRM tag keeps refresh tracking it,
+      // AND it's what stops a lead Wrekin later deletes from being recreated
+      // here. The gate above proved the tag was absent, so `false` (which
+      // ensureTagOnProject also returns on a swallowed error) means it failed.
+      // Under DRY_RUN the add is skipped but still reported as added.
+      const tagged = await deps.ensureTagOnProject(pid, crmTagId);
+      if (!tagged && result?.created) {
+        s.tagFailed.push({ pid, title: project.project_title });
+        logger.warn(`[catchupSync] ${pid} created but the CRM tag could not be applied — add it in Barbour`);
+      }
     } catch (err) {
       if (deps.isArchivedLeadError(err)) {
         s.archived.push({ pid, title: err.leadTitle });

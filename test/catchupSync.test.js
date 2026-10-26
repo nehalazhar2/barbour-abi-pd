@@ -74,6 +74,8 @@ const baseSummary = (over = {}) => ({
   archived: [],
   failed: 0,
   failures: [],
+  tagFailed: [],
+  capped: 0,
   budgetStopped: false,
   remaining: 0,
   elapsedMs: 60000,
@@ -134,7 +136,7 @@ test('buildCatchupEmail reports a budget stop', () => {
 // runCatchupSync — orchestration with fake dependencies
 // ---------------------------------------------------------------------------
 
-import { runCatchupSync } from '../src/sync/catchupSync.js';
+import { runCatchupSync, nearDailyRun } from '../src/sync/catchupSync.js';
 
 const CRM_ID = 900;
 
@@ -193,7 +195,9 @@ function fakeWorld({
     ensureTagOnProject: async (pid, tagId) => { calls.ensureTag.push({ pid, tagId }); return true; },
     isArchivedLeadError: (err) => err?.name === 'ArchivedLeadError',
     sendEmail: async (msg) => { calls.emails.push(msg); },
-    now: clock || Date.now,
+    // Fixed midday by default: nearDailyRun() reads this clock, and a test run
+    // at 06:30–07:59 London must not change the outcome.
+    now: clock || (() => Date.parse('2026-10-25T12:00:00Z')),
   };
   return { deps, calls, leadPids };
 }
@@ -250,7 +254,7 @@ test('runCatchupSync recheck skips a project findLeadByBarbourId finds', async (
   const s = await runCatchupSync(deps, opts());
   assert.equal(calls.processProject.length, 0);
   assert.equal(s.foundOnRecheck, 1);
-  assert.deepEqual(calls.recheck[0].opts, { includeDeleted: true });
+  assert.deepEqual(calls.recheck[0].opts, { includeDeleted: true, strict: true });
 });
 
 test('runCatchupSync skips a soft-deleted lead and lists it', async () => {
@@ -349,7 +353,7 @@ test('runCatchupSync counts an ArchivedLeadError from processProject as archived
 });
 
 test('runCatchupSync stops at the runtime budget and reports the remainder', async () => {
-  let t = 0;
+  let t = Date.parse('2026-10-25T12:00:00Z');
   const clock = () => t;
   const { deps, calls } = fakeWorld({ searches: { A: [1, 2, 3] }, clock });
   const realProcess = deps.processProject;
@@ -386,4 +390,45 @@ test('runCatchupSync dry-run flag reaches the email subject', async () => {
   const { deps, calls } = fakeWorld({ searches: { A: [] }, tagged: [9] });
   await runCatchupSync(deps, opts({ dryRun: true }));
   assert.match(calls.emails[0].subject, /^\[DRY RUN\]/);
+});
+
+test('runCatchupSync reports a created project whose CRM tag could not be applied', async () => {
+  const { deps } = fakeWorld({ searches: { A: [1, 2] } });
+  deps.ensureTagOnProject = async (pid) => pid !== 2;
+  const s = await runCatchupSync(deps, opts());
+  assert.equal(s.created, 2);
+  assert.deepEqual(s.tagFailed, [{ pid: 2, title: 'Project 2' }]);
+});
+
+test('runCatchupSync reports candidates left out by MAX_PROJECTS', async () => {
+  const { deps, calls } = fakeWorld({ searches: { A: [1, 2, 3] } });
+  const s = await runCatchupSync(deps, opts({ maxProjects: 1 }));
+  assert.equal(s.capped, 2);
+  assert.ok(calls.emails[0].text.includes('MAX_PROJECTS_PER_SYNC'));
+});
+
+test('runCatchupSync stops before the 07:00 daily run', async () => {
+  // 06:20 London (BST in force until 25 Oct 2026, so 05:20Z on 24 Oct).
+  let t = Date.parse('2026-10-24T05:20:00Z');
+  const { deps, calls } = fakeWorld({ searches: { A: [1, 2, 3] }, clock: () => t });
+  const real = deps.processProject;
+  deps.processProject = async (...a) => { t += 6 * 60_000; return real(...a); };
+  const s = await runCatchupSync(deps, opts());
+  assert.deepEqual(calls.processProject.map((c) => c.pid), [1, 2], '06:20 and 06:26 run; 06:32 stops');
+  assert.equal(s.budgetStopped, true);
+  assert.equal(s.remaining, 1);
+});
+
+test('nearDailyRun covers 06:30-07:59 London in winter and summer time', () => {
+  assert.equal(nearDailyRun(Date.parse('2026-11-01T06:29:00Z')), false); // GMT 06:29
+  assert.equal(nearDailyRun(Date.parse('2026-11-01T06:30:00Z')), true);  // GMT 06:30
+  assert.equal(nearDailyRun(Date.parse('2026-11-01T07:59:00Z')), true);
+  assert.equal(nearDailyRun(Date.parse('2026-11-01T08:00:00Z')), false);
+  assert.equal(nearDailyRun(Date.parse('2026-07-01T05:45:00Z')), true);  // BST 06:45
+  assert.equal(nearDailyRun(Date.parse('2026-07-01T07:00:00Z')), false); // BST 08:00
+});
+
+test('buildCatchupEmail held body tells you to restore the cap', () => {
+  const { text } = buildCatchupEmail(baseSummary({ held: true, candidates: 300, heldPids: [1] }));
+  assert.ok(text.includes('back to its usual value'));
 });

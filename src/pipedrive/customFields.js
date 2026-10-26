@@ -45,9 +45,11 @@ export const fields = config.pipedrive.customFields;
 // Our Barbour ID fields should be type "text" (varchar) so they're searchable.
 
 // includeDeleted: return a soft-deleted match (flags intact) instead of skipping
-// it. Only the weekly catch-up uses this — to tell "Wrekin deleted this lead"
-// apart from "never imported". Every create/update path keeps the default.
-export async function searchByCustomField(itemType, fieldKey, value, { includeDeleted = false } = {}) {
+// it. strict: if the verify-fetch below fails (429/5xx/timeout), throw instead
+// of treating the candidate as "no match" — a transient PD error must not read
+// as "no lead exists" to a caller about to CREATE one. Only the weekly catch-up
+// passes these; every existing create/update path keeps the defaults.
+export async function searchByCustomField(itemType, fieldKey, value, { includeDeleted = false, strict = false } = {}) {
   if (!fieldKey || value === undefined || value === null || value === '') return null;
   const res = await requestV2(
     {
@@ -90,7 +92,8 @@ export async function searchByCustomField(itemType, fieldKey, value, { includeDe
           item = full.data?.data || item;
           cf = readCustomField(item, fieldKey);
         }
-      } catch {
+      } catch (err) {
+        if (strict) throw err;
         cf = undefined;
       }
     }

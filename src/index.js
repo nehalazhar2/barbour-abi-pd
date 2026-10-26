@@ -9,6 +9,7 @@ import { runBackfillReprocess, parkForever } from './sync/backfillReprocess.js';
 import { resetSavedSearchCache } from './barbourabi/savedSearches.js';
 import { resetTagCache } from './barbourabi/tags.js';
 import { runCatchupSync } from './sync/catchupSync.js';
+import { sendBackfillEmail } from './utils/alerts.js';
 
 // One lock for every pass: the daily run and the weekly catch-up must never
 // overlap (both write the same leads). A skipped run alerts — a silent skip
@@ -89,6 +90,13 @@ async function runCatchup(trigger = 'cron') {
   } catch (err) {
     logger.error(`[catchupSync] run failed: ${err.message}`);
     await sendFailureAlert(err, { trigger, sync: 'catchup' });
+    // The catch-up's own recipients should hear about a failed week too, not
+    // only ALERT_EMAIL. (No-op under DRY_RUN.)
+    await sendBackfillEmail({
+      to: config.catchup.alertEmails,
+      subject: 'Barbour weekly catch-up: FAILED — nothing imported',
+      text: `The weekly catch-up stopped before importing anything:\n\n${err.message}\n\nIt will try again next week. Check DO Runtime Logs for detail.`,
+    });
   } finally {
     running = false;
   }
@@ -137,7 +145,11 @@ function start() {
 
   // Startup runs go one after the other, never in parallel (shared lock).
   const runDaily = process.env.RUN_ON_START === 'true';
-  const runWeekly = config.catchup.runOnStart;
+  // A leftover CATCHUP_RUN_ON_START must not run a catch-up that's switched off.
+  const runWeekly = config.catchup.runOnStart && config.catchup.enabled;
+  if (config.catchup.runOnStart && !config.catchup.enabled) {
+    logger.warn('[index] CATCHUP_RUN_ON_START=true ignored — CATCHUP_ENABLED is not "true"');
+  }
   if (runDaily || runWeekly) {
     (async () => {
       if (runDaily) {

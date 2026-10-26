@@ -35,17 +35,17 @@ function toDateOnly(value) {
 // this integration existed). Returns { lead, viaLegacy } — viaLegacy=true means
 // the caller should adopt it: preserve the manually-set owner_id and let the
 // normal update path backfill our own field so next sync uses the fast path.
-export async function findLeadByBarbourId(barbourProjectId, { includeDeleted = false } = {}) {
+export async function findLeadByBarbourId(barbourProjectId, { includeDeleted = false, strict = false } = {}) {
   const key = fields.lead.barbourProjectId;
   if (!key) {
     logger.warn('[pd-lead] PD_FIELD_LEAD_BARBOUR_ID not configured — cannot dedup leads');
     return { lead: null, viaLegacy: false };
   }
-  const own = await searchByCustomField('lead', key, barbourProjectId, { includeDeleted });
+  const own = await searchByCustomField('lead', key, barbourProjectId, { includeDeleted, strict });
   if (own) return { lead: own, viaLegacy: false };
   const legacyKey = fields.lead.legacyBarbourProjectId;
   if (legacyKey) {
-    const legacy = await searchByCustomField('lead', legacyKey, barbourProjectId, { includeDeleted });
+    const legacy = await searchByCustomField('lead', legacyKey, barbourProjectId, { includeDeleted, strict });
     if (legacy) {
       logger.info(
         `[pd-lead] adopting legacy lead ${legacy.id} for Barbour project ${barbourProjectId} ` +
