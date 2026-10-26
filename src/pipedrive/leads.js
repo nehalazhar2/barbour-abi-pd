@@ -421,3 +421,23 @@ export async function listLeadBarbourIds() {
   }
   return ids;
 }
+
+// Deals carrying a Barbour project id (Leads converted to Deals), any status
+// but deleted. org_id and org-type fields come back as OBJECTS here.
+export async function listBarbourDeals() {
+  const key = fields.lead.barbourProjectId;
+  if (!key) throw new Error('PD_FIELD_LEAD_BARBOUR_ID not configured');
+  const out = [];
+  let start = 0;
+  for (;;) {
+    const res = await requestV1(
+      { method: 'GET', url: '/deals', params: { limit: 500, start, status: 'all_not_deleted' } },
+      { label: 'pd-listDeals' },
+    );
+    for (const d of res.data?.data || []) if (d[key]) out.push(d);
+    const pg = res.data?.additional_data?.pagination;
+    if (!pg?.more_items_in_collection || pg.next_start == null) break;
+    start = pg.next_start;
+  }
+  return out;
+}

@@ -177,6 +177,10 @@ export const config = {
         // single-value `barbourRole` text field instead.
         roleTypes: process.env.PD_FIELD_ORG_ROLE_TYPES,
         phone: process.env.PD_FIELD_ORG_PHONE,
+        // Phase 2 / A1 roll-up (src/sync/rollupSync.js). Both must be set for
+        // the pass to run; empty = off. Monetary + numeric fields on Organisation.
+        rollupValue: process.env.PD_FIELD_ORG_ROLLUP_VALUE,
+        rollupCount: process.env.PD_FIELD_ORG_ROLLUP_COUNT,
       },
       // Ordered slot list for associated orgs on the Lead/Deal. Orgs pack into these
       // slots 1..15 (primary org → slot 1, remaining orgs in BARBOURABI_ROLES config
@@ -312,6 +316,16 @@ export const config = {
       if (backfill?.length) return backfill;
       return [process.env.ALERT_EMAIL].filter(Boolean);
     })(),
+  },
+  // Phase 2 / A1 organisation roll-up (src/sync/rollupSync.js). Runs at the end
+  // of the daily run when PD_FIELD_ORG_ROLLUP_VALUE + _COUNT are set.
+  rollup: {
+    // Converted Deals count toward the roll-up (our recommendation; Wrekin to
+    // confirm — see docs/builds/2026-10-26-phase2-A1.md).
+    includeDeals: (process.env.ROLLUP_INCLUDE_DEALS || 'true').trim().toLowerCase() !== 'false',
+    maxWrites: parseNonNegativeInt('ROLLUP_MAX_WRITES', 1500),
+    // Below this many Barbour leads the lead read is treated as incomplete.
+    minLeads: parseNonNegativeInt('ROLLUP_MIN_LEADS', 5000),
   },
   dryRun: (process.env.DRY_RUN || '').toLowerCase() === 'true',
   // Optional safety cap — applied per sync (tag-sync and filter-sync each get up to N).

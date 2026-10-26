@@ -1,4 +1,4 @@
-import { requestV2 } from './client.js';
+import { requestV1, requestV2 } from './client.js';
 import { wrapForV2, fields, searchByCustomField, readCustomField } from './customFields.js';
 import { getCompany, buildCompanyAddress } from '../barbourabi/companies.js';
 import { getOrgRoleTypeOptions, resolveRoleOptionId, unionOptionIds } from './orgFieldOptions.js';
@@ -274,4 +274,107 @@ export async function upsertOrg(role) {
   }
   logger.debug(`[pd-org] creating org (${enriched.company_name})`);
   return createOrg(enriched);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 / A1 roll-up — bulk reads and per-org writes (src/sync/rollupSync.js)
+// ---------------------------------------------------------------------------
+
+// Monetary custom fields come back as a bare number or { value, currency }.
+function amountOf(v) {
+  if (v == null || v === '') return null;
+  const n = Number(typeof v === 'object' ? v.value : v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Every organisation, with what the roll-up needs. v2 cursor paging. Throws on
+// any failed page — a partial list must never reach the roll-up.
+export async function listBarbourOrgs({ valueKey, countKey } = {}) {
+  const idKey = fields.org.barbourCompanyId;
+  if (!idKey) throw new Error('PD_FIELD_ORG_BARBOUR_ID not configured');
+  const out = [];
+  let cursor;
+  do {
+    const res = await requestV2(
+      { method: 'GET', url: '/organizations', params: { limit: 500, ...(cursor ? { cursor } : {}) } },
+      { label: 'pd-listOrgs' },
+    );
+    for (const o of res.data?.data || []) {
+      const cf = o.custom_fields || {};
+      out.push({
+        id: o.id,
+        name: o.name,
+        barbourId: cf[idKey] ?? null,
+        count: countKey ? amountOf(cf[countKey]) : null,
+        value: valueKey ? amountOf(cf[valueKey]) : null,
+      });
+    }
+    cursor = res.data?.additional_data?.next_cursor || null;
+  } while (cursor);
+  return out;
+}
+
+// Roll-up notes written by the integration, grouped by org. Read by author
+// (the API user) — NOT by pinned flag, so a note a user unpinned is still
+// found and updated rather than duplicated. Lead/deal notes are excluded.
+export async function listRollupNotes({ userId, isOurs }) {
+  const byOrg = new Map();
+  let start = 0;
+  let scanned = 0;
+  for (;;) {
+    const res = await requestV1(
+      { method: 'GET', url: '/notes', params: { user_id: userId, limit: 500, start } },
+      { label: 'pd-listNotes' },
+    );
+    for (const n of res.data?.data || []) {
+      scanned += 1;
+      if (!n.org_id || n.lead_id || n.deal_id || n.person_id) continue;
+      if (!isOurs(n.content)) continue;
+      const list = byOrg.get(n.org_id) || [];
+      list.push({ id: n.id, content: n.content, update_time: n.update_time, pinned: !!n.pinned_to_organization_flag });
+      byOrg.set(n.org_id, list);
+    }
+    const pg = res.data?.additional_data?.pagination;
+    if (!pg?.more_items_in_collection || pg.next_start == null) break;
+    start = pg.next_start;
+  }
+  return { byOrg, scanned };
+}
+
+export async function getApiUserId() {
+  const res = await requestV1({ method: 'GET', url: '/users/me' }, { label: 'pd-usersMe' });
+  const id = res.data?.data?.id;
+  if (!id) throw new Error('could not resolve the API user (GET /users/me)');
+  return id;
+}
+
+// One org's roll-up: fields, then note, then superseded duplicates. Monetary
+// v2 shape { value, currency } — VERIFY at launch against a value typed in the
+// PD UI before switching on (docs/builds/2026-10-26-phase2-A1.md, finding 10).
+export async function writeOrgRollup(orgId, { fields: f, note, deleteNoteIds = [], content }, { valueKey, countKey }) {
+  if (f) {
+    await requestV2(
+      {
+        method: 'PATCH',
+        url: `/organizations/${orgId}`,
+        data: { custom_fields: { [countKey]: f.count, [valueKey]: { value: f.total, currency: 'GBP' } } },
+      },
+      { label: 'pd-orgRollupFields' },
+    );
+  }
+  if (note?.action === 'create') {
+    await requestV1(
+      { method: 'POST', url: '/notes', data: { org_id: orgId, content, pinned_to_organization_flag: 1 } },
+      { label: 'pd-orgRollupNoteCreate' },
+    );
+  } else if (note?.action === 'update') {
+    await requestV1(
+      { method: 'PUT', url: `/notes/${note.noteId}`, data: { content } },
+      { label: 'pd-orgRollupNoteUpdate' },
+    );
+  }
+  // Only ever notes carrying our roll-up marker (planWrites guarantees it).
+  for (const id of deleteNoteIds) {
+    await requestV1({ method: 'DELETE', url: `/notes/${id}` }, { label: 'pd-orgRollupNoteDelete' });
+  }
 }
