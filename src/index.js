@@ -8,12 +8,21 @@ import { runRefreshSync } from './sync/refreshSync.js';
 import { runBackfillReprocess, parkForever } from './sync/backfillReprocess.js';
 import { resetSavedSearchCache } from './barbourabi/savedSearches.js';
 import { resetTagCache } from './barbourabi/tags.js';
+import { runCatchupSync } from './sync/catchupSync.js';
 
+// One lock for every pass: the daily run and the weekly catch-up must never
+// overlap (both write the same leads). A skipped run alerts — a silent skip
+// would look exactly like a quiet day.
 let running = false;
+
+async function alertSkipped(what, trigger) {
+  logger.warn(`[${what}] another run still in progress — skipping (trigger=${trigger})`);
+  await sendFailureAlert(new Error(`${what} skipped: another sync run was still in progress`), { trigger, reason: 'lock held' });
+}
 
 async function runAll(trigger = 'cron') {
   if (running) {
-    logger.warn(`[runAll] previous run still in progress — skipping (trigger=${trigger})`);
+    await alertSkipped('runAll', trigger);
     return;
   }
   running = true;
@@ -68,6 +77,23 @@ async function runAll(trigger = 'cron') {
   }
 }
 
+// Weekly saved-search catch-up — see src/sync/catchupSync.js.
+async function runCatchup(trigger = 'cron') {
+  if (running) {
+    await alertSkipped('catchupSync', trigger);
+    return;
+  }
+  running = true;
+  try {
+    await runCatchupSync();
+  } catch (err) {
+    logger.error(`[catchupSync] run failed: ${err.message}`);
+    await sendFailureAlert(err, { trigger, sync: 'catchup' });
+  } finally {
+    running = false;
+  }
+}
+
 function scheduleCron() {
   logger.info(
     `[index] scheduling sync with cron "${config.schedule.cron}" (${config.schedule.timezone})`,
@@ -75,6 +101,15 @@ function scheduleCron() {
   cron.schedule(config.schedule.cron, () => runAll('cron'), {
     timezone: config.schedule.timezone,
   });
+  if (!config.catchup.enabled) {
+    logger.info('[index] weekly catch-up disabled (CATCHUP_ENABLED is not "true")');
+  } else if (!cron.validate(config.catchup.cron)) {
+    // Don't throw: a boot failure makes DO roll back the whole deploy.
+    logger.error(`[index] CATCHUP_CRON "${config.catchup.cron}" is not a valid cron expression — weekly catch-up NOT scheduled`);
+  } else {
+    logger.info(`[index] scheduling weekly catch-up with cron "${config.catchup.cron}" (${config.schedule.timezone}); hold above ${config.catchup.maxCreates}`);
+    cron.schedule(config.catchup.cron, () => runCatchup('cron'), { timezone: config.schedule.timezone });
+  }
   logger.info('[index] scheduler running. Press Ctrl+C to exit.');
 }
 
@@ -100,9 +135,20 @@ function start() {
 
   scheduleCron();
 
-  if (process.env.RUN_ON_START === 'true') {
-    logger.info('[index] RUN_ON_START=true — kicking off initial run');
-    runAll('startup');
+  // Startup runs go one after the other, never in parallel (shared lock).
+  const runDaily = process.env.RUN_ON_START === 'true';
+  const runWeekly = config.catchup.runOnStart;
+  if (runDaily || runWeekly) {
+    (async () => {
+      if (runDaily) {
+        logger.info('[index] RUN_ON_START=true — kicking off initial run');
+        await runAll('startup');
+      }
+      if (runWeekly) {
+        logger.info('[index] CATCHUP_RUN_ON_START=true — running the weekly catch-up now. Unset it afterwards.');
+        await runCatchup('startup');
+      }
+    })();
   }
 }
 
