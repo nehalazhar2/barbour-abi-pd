@@ -1,4 +1,6 @@
 import { logger } from '../utils/logger.js';
+import { fields } from '../pipedrive/customFields.js';
+import { getSetFieldOptions, normaliseOptionLabel } from '../pipedrive/leadFieldOptions.js';
 
 // Phase 2 / A7 — two multi-select Lead fields Wrekin filters and segments on:
 //   Project Stage          — the project's Barbour planning and/or contract stage
@@ -112,4 +114,44 @@ export function productCategoryLabels(project) {
   if (!Array.isArray(raw)) return undefined;
   const codes = new Set(raw.map((c) => String(c).trim().toUpperCase()));
   return PRODUCT_CATEGORY_CODES.filter(([code]) => codes.has(code)).map(([, label]) => label);
+}
+
+// Call at the start of every run (daily, catch-up, backfill) so problems are
+// reported every run, not once per deploy.
+export function resetClassificationRun() {
+  resetClassificationWarnings();
+}
+
+// Custom-field values for the Lead body. Keys are only present when they
+// should be written: value → set, null → clear, absent → leave PD untouched.
+export async function buildClassificationFields(project, {
+  optionsFor = getSetFieldOptions,
+  fieldKeys = { stage: fields.lead.projectStage, category: fields.lead.productCategory },
+} = {}) {
+  const out = {};
+  const plan = [
+    ['Project Stage', fieldKeys.stage, projectStageLabels],
+    ['Product Category Type', fieldKeys.category, productCategoryLabels],
+  ];
+  for (const [name, key, labelsFor] of plan) {
+    if (!key) continue;
+    const labels = labelsFor(project);
+    if (labels === undefined) continue;
+    const options = await optionsFor(key);
+    if (!options) {
+      warnOnce(`load:${key}`, `[classification] ${name} options unavailable (field ${key} missing or unreadable) — not writing it this time`);
+      continue;
+    }
+    if (labels.length === 0) { out[key] = null; continue; }
+    const ids = labels.map((l) => options.get(normaliseOptionLabel(l)));
+    const missing = labels.filter((_, i) => ids[i] == null);
+    if (missing.length) {
+      // A set write replaces the whole value, so writing the subset would DROP
+      // the renamed option from every lead. Leave the field as it is instead.
+      warnOnce(`label:${key}:${missing.join('|')}`, `[classification] ${name} has no PD option for ${missing.map((m) => `"${m}"`).join(', ')} — field not written (rename it back in PD, or update leadClassification.js)`);
+      continue;
+    }
+    out[key] = [...new Set(ids)].sort((a, b) => a - b).join(',');
+  }
+  return out;
 }

@@ -82,10 +82,73 @@ export function resolveSearchOptionId(optionsMap, searchName) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Generic `set` field options (A7 Project Stage / Product Category Type).
+// ---------------------------------------------------------------------------
+// One shared /dealFields read serves every key (10 min TTL). A failed read is
+// remembered for 60s so a PD outage costs one request a minute, not two per
+// project. Kept separate from getBarbourSearchOptions on purpose: that returns
+// an empty Map for a missing field, this returns null — callers here must be
+// able to tell "field missing / unreadable" (write nothing) from "no options".
+const SET_TTL_MS = 10 * 60 * 1000;
+const SET_FAIL_TTL_MS = 60 * 1000;
+let setFields = null; // Map(fieldKey → Map(normalisedLabel → id))
+let setFieldsAt = 0;
+let setFailedAt = null;
+
+export function normaliseOptionLabel(s) {
+  return normaliseSearchName(s);
+}
+
+async function fetchAllDealFields() {
+  const out = [];
+  let start = 0;
+  for (;;) {
+    const res = await requestV1(
+      { method: 'GET', url: '/dealFields', params: { limit: 500, start } },
+      { label: 'pd-dealFields' },
+    );
+    out.push(...(res.data?.data || []));
+    const pg = res.data?.additional_data?.pagination;
+    if (!pg?.more_items_in_collection || pg.next_start == null) break;
+    start = pg.next_start;
+  }
+  return out;
+}
+
+export async function getSetFieldOptions(fieldKey, { fetchFields = fetchAllDealFields, now = Date.now } = {}) {
+  if (!fieldKey) return null;
+  const t = now();
+  if (setFailedAt != null && t - setFailedAt < SET_FAIL_TTL_MS) return null;
+  if (!setFields || t - setFieldsAt >= SET_TTL_MS) {
+    try {
+      const all = await fetchFields();
+      const map = new Map();
+      for (const f of all) {
+        if (!f?.key || !Array.isArray(f.options)) continue;
+        const opts = new Map();
+        for (const o of f.options) if (o?.label && o.id != null) opts.set(normaliseOptionLabel(o.label), Number(o.id));
+        map.set(f.key, opts);
+      }
+      setFields = map;
+      setFieldsAt = t;
+      setFailedAt = null;
+    } catch (err) {
+      setFailedAt = t;
+      logger.warn(`[pd-lead] could not load deal field options (retry in 60s): ${err.message}`);
+      return null;
+    }
+  }
+  return setFields.get(fieldKey) ?? null;
+}
+
 export const __test__ = {
   resetCache: () => {
     cachedSearchOptions = null;
     cachedAt = 0;
     warnedUnknownSearches.clear();
+    setFields = null;
+    setFieldsAt = 0;
+    setFailedAt = null;
   },
 };
