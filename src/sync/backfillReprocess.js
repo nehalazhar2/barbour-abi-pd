@@ -9,7 +9,7 @@ import { getBarbourSearchOptions, resolveSearchOptionId } from '../pipedrive/lea
 import { getSavedSearchByName, matchedSearchesByProject } from '../barbourabi/savedSearches.js';
 import { getProjectsByQuery, getTaggedProjects, getProjectById } from '../barbourabi/projects.js';
 import { getTagIdByName, ensureTagOnProject } from '../barbourabi/tags.js';
-import { isArchivedLeadError, findLeadByBarbourId } from '../pipedrive/leads.js';
+import { isArchivedLeadError, findLeadByBarbourId, listAllLeads } from '../pipedrive/leads.js';
 import { processProject } from './processProject.js';
 
 // One-off re-process of the existing Pipedrive data so records imported before the
@@ -184,22 +184,6 @@ function recordFailure(s, id, title, err) {
 // Phase: search — Barbour Search field + Filter-Sync label
 // ---------------------------------------------------------------------------
 
-async function fetchAllLeads() {
-  const out = [];
-  let start = 0;
-  for (;;) {
-    const res = await requestV1(
-      { method: 'GET', url: '/leads', params: { limit: 500, start, archived_status: 'all' } },
-      { label: 'backfill-leads' },
-    );
-    out.push(...(res.data?.data || []));
-    const pg = res.data?.additional_data?.pagination;
-    if (!pg?.more_items_in_collection || pg.next_start == null) break;
-    start = pg.next_start;
-  }
-  return out;
-}
-
 async function runSearchPhase(run, report) {
   const phase = 'search';
   const names = config.barbourabi.savedSearchNames;
@@ -227,7 +211,7 @@ async function runSearchPhase(run, report) {
   if (!optionsMap || optionsMap.size === 0) throw new Error('Barbour Search field has no options in PD');
 
   // 3. Index PD leads by Barbour project id.
-  const leads = await fetchAllLeads();
+  const leads = await listAllLeads();
   const leadByPid = new Map();
   for (const l of leads) {
     const pid = Number(l[fields.lead.barbourProjectId]);

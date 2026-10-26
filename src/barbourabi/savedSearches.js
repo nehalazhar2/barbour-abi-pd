@@ -7,6 +7,13 @@ import { getProjectsByQuery } from './projects.js';
 
 let cached = null;
 
+// The worker is long-lived, so without this a search edited (or deleted) in
+// Barbour keeps running as it was at the last deploy. Called at the start of
+// every sync run and every catch-up.
+export function resetSavedSearchCache() {
+  cached = null;
+}
+
 async function getAllSavedSearches() {
   if (cached) return cached;
   const res = await request(

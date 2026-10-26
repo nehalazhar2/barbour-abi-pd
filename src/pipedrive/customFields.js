@@ -44,7 +44,10 @@ export const fields = config.pipedrive.customFields;
 //   address, varchar, text, varchar_auto, double, monetary, phone
 // Our Barbour ID fields should be type "text" (varchar) so they're searchable.
 
-export async function searchByCustomField(itemType, fieldKey, value) {
+// includeDeleted: return a soft-deleted match (flags intact) instead of skipping
+// it. Only the weekly catch-up uses this — to tell "Wrekin deleted this lead"
+// apart from "never imported". Every create/update path keeps the default.
+export async function searchByCustomField(itemType, fieldKey, value, { includeDeleted = false } = {}) {
   if (!fieldKey || value === undefined || value === null || value === '') return null;
   const res = await requestV2(
     {
@@ -95,7 +98,7 @@ export async function searchByCustomField(itemType, fieldKey, value) {
     // just flips is_deleted / active_flag) and updating one 403s with
     // "Cannot update a deleted <entity>". The verify-fetch above populates
     // is_deleted / active_flag on org & person GETs.
-    if (item?.is_deleted === true || item?.active_flag === false) continue;
+    if (!includeDeleted && (item?.is_deleted === true || item?.active_flag === false)) continue;
     if (String(cf) === String(value)) return item;
   }
   return null;

@@ -17,6 +17,19 @@ const parseOwnerMap = (raw) => {
   return map;
 };
 
+// Integer env var that must be ≥0. A typo must not silently disable a safety
+// limit (parseInt('abc') is NaN, and `n > NaN` is always false), so anything
+// unparseable falls back to the default with a warning. console, not logger —
+// logger imports this module.
+const parseNonNegativeInt = (name, fallback) => {
+  const raw = (process.env[name] || '').trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 0) return n;
+  console.warn(`[config] ${name}="${raw}" is not a whole number ≥0 — using ${fallback}`);
+  return fallback;
+};
+
 export const config = {
   barbourabi: {
     apiKey: process.env.BARBOURABI_API_KEY,
@@ -278,6 +291,23 @@ export const config = {
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
+  },
+  // Weekly saved-search catch-up (src/sync/catchupSync.js). Imports search
+  // projects the daily 24h lookback missed. OFF unless CATCHUP_ENABLED=true —
+  // set it at BOTH DO levels (app + component) when switching on.
+  catchup: {
+    enabled: (process.env.CATCHUP_ENABLED || '').trim().toLowerCase() === 'true',
+    cron: (process.env.CATCHUP_CRON || '').trim() || '0 9 * * 0', // Sunday 09:00 London
+    maxCreates: parseNonNegativeInt('CATCHUP_MAX_CREATES', 200),
+    maxRuntimeMinutes: parseNonNegativeInt('CATCHUP_MAX_RUNTIME_MINUTES', 600),
+    runOnStart: (process.env.CATCHUP_RUN_ON_START || '').trim().toLowerCase() === 'true',
+    alertEmails: (() => {
+      const own = parseRoles(process.env.CATCHUP_ALERT_EMAILS);
+      if (own?.length) return own;
+      const backfill = parseRoles(process.env.BACKFILL_ALERT_EMAILS);
+      if (backfill?.length) return backfill;
+      return [process.env.ALERT_EMAIL].filter(Boolean);
+    })(),
   },
   dryRun: (process.env.DRY_RUN || '').toLowerCase() === 'true',
   // Optional safety cap — applied per sync (tag-sync and filter-sync each get up to N).

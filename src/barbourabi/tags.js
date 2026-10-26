@@ -11,6 +11,11 @@ import { config } from '../config.js';
 
 let cachedTags = null;
 
+// Long-lived worker: re-read the tag list each run (see resetSavedSearchCache).
+export function resetTagCache() {
+  cachedTags = null;
+}
+
 async function getAllTags() {
   if (cachedTags) return cachedTags;
   const res = await request({ method: 'GET', url: '/tags' }, { label: 'barbourabi-getAllTags' });

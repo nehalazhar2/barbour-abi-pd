@@ -13,6 +13,10 @@ function getClient() {
 
 export async function sendFailureAlert(error, context = {}) {
   const { email, from } = config.alerts;
+  if (config.dryRun) {
+    logger.info(`[DRY RUN] sendFailureAlert skipped — ${error?.message || error} ${JSON.stringify(context)}`);
+    return;
+  }
   if (!email) {
     logger.warn('[alerts] ALERT_EMAIL not configured — skipping email');
     return;

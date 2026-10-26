@@ -35,17 +35,17 @@ function toDateOnly(value) {
 // this integration existed). Returns { lead, viaLegacy } — viaLegacy=true means
 // the caller should adopt it: preserve the manually-set owner_id and let the
 // normal update path backfill our own field so next sync uses the fast path.
-export async function findLeadByBarbourId(barbourProjectId) {
+export async function findLeadByBarbourId(barbourProjectId, { includeDeleted = false } = {}) {
   const key = fields.lead.barbourProjectId;
   if (!key) {
     logger.warn('[pd-lead] PD_FIELD_LEAD_BARBOUR_ID not configured — cannot dedup leads');
     return { lead: null, viaLegacy: false };
   }
-  const own = await searchByCustomField('lead', key, barbourProjectId);
+  const own = await searchByCustomField('lead', key, barbourProjectId, { includeDeleted });
   if (own) return { lead: own, viaLegacy: false };
   const legacyKey = fields.lead.legacyBarbourProjectId;
   if (legacyKey) {
-    const legacy = await searchByCustomField('lead', legacyKey, barbourProjectId);
+    const legacy = await searchByCustomField('lead', legacyKey, barbourProjectId, { includeDeleted });
     if (legacy) {
       logger.info(
         `[pd-lead] adopting legacy lead ${legacy.id} for Barbour project ${barbourProjectId} ` +
@@ -387,4 +387,37 @@ export async function clearIntegrationNotes(leadId) {
     );
   }
   return ours.length;
+}
+
+// Every lead, paged. NOTE: despite archived_status=all, the list endpoint does
+// NOT return archived leads (measured 26 Oct 2026: 7,626 rows, 0 archived;
+// Liverpool's archived lead absent). Soft-deleted leads aren't returned either.
+// Anything that treats "not in this list" as "no lead" must re-check per id
+// with findLeadByBarbourId, which does see archived leads.
+export async function listAllLeads() {
+  const out = [];
+  let start = 0;
+  for (;;) {
+    const res = await requestV1(
+      { method: 'GET', url: '/leads', params: { limit: 500, start, archived_status: 'all' } },
+      { label: 'pd-listLeads' },
+    );
+    out.push(...(res.data?.data || []));
+    const pg = res.data?.additional_data?.pagination;
+    if (!pg?.more_items_in_collection || pg.next_start == null) break;
+    start = pg.next_start;
+  }
+  return out;
+}
+
+// Set of Barbour project ids that have a (non-archived, non-deleted) lead.
+export async function listLeadBarbourIds() {
+  const key = fields.lead.barbourProjectId;
+  if (!key) throw new Error('PD_FIELD_LEAD_BARBOUR_ID not configured — cannot index leads');
+  const ids = new Set();
+  for (const l of await listAllLeads()) {
+    const pid = Number(l[key]);
+    if (pid) ids.add(pid);
+  }
+  return ids;
 }

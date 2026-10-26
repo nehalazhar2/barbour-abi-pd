@@ -8,6 +8,7 @@ import { logger } from '../utils/logger.js';
 //   `limit` + `offset` pagination. Max useful limit seems to be 500.
 
 const PAGE_SIZE = 100;
+const MAX_PAGES = 200;
 
 // Fields we read off projects later (in processProject + leads.js).
 // Keep this in sync with what processProject.js consumes.
@@ -35,13 +36,20 @@ const PROJECT_FIELDS = [
 async function paginate(buildParams, label) {
   const all = [];
   let offset = 0;
-  for (let page = 0; page < 200; page += 1) {
+  let complete = false;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
     const params = { ...buildParams(), fields: PROJECT_FIELDS, limit: PAGE_SIZE, offset };
     const res = await request({ method: 'GET', url: '/projects', params }, { label });
     const batch = res.data?.projects ?? [];
     all.push(...batch);
-    if (batch.length < PAGE_SIZE) break;
+    if (batch.length < PAGE_SIZE) { complete = true; break; }
     offset += PAGE_SIZE;
+  }
+  // Hitting the page cap means rows were silently dropped. Flag it so callers
+  // that must not act on a partial list (the weekly catch-up) can refuse to.
+  if (!complete) {
+    all.truncated = true;
+    logger.warn(`[projects] ${label} hit the ${MAX_PAGES}-page cap (${all.length} rows) — listing is TRUNCATED`);
   }
   logger.debug(`[projects] ${label} fetched ${all.length} total`);
   return all;
@@ -56,8 +64,10 @@ async function paginate(buildParams, label) {
 // handful of ids can pass { passes: 1 }.
 export async function getTaggedProjects(tagId, { passes = 3 } = {}) {
   const byId = new Map();
+  let truncated = false;
   for (let i = 0; i < passes; i += 1) {
     const rows = await paginate(() => ({ tag_id: tagId }), 'barbourabi-getTaggedProjects');
+    if (rows.truncated) truncated = true;
     let added = 0;
     for (const p of rows) {
       const id = Number(p?.project_id);
@@ -68,7 +78,9 @@ export async function getTaggedProjects(tagId, { passes = 3 } = {}) {
     logger.debug(`[projects] tag ${tagId} pass ${i + 1}/${passes}: ${rows.length} rows, ${added} new (union ${byId.size})`);
     if (i > 0 && added === 0) break; // listing was stable this time — no need for more passes
   }
-  return [...byId.values()];
+  const out = [...byId.values()];
+  if (truncated) out.truncated = true;
+  return out;
 }
 
 // `query` is the JSON filter object (Barbour's filter DSL) — we JSON-encode it.
