@@ -332,7 +332,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     ? { customFieldValues: {} }
     : buildLeadOrgSlotAssignments(roles, primaryOrgRole, orgByBarbourCompanyId);
 
-  const { lead, created, createdAs } = await upsertLead(
+  const { lead, created, createdAs, skippedForDeal } = await upsertLead(
     project,
     primaryOrgId,
     primaryPersonId,
@@ -374,7 +374,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     }
   }
 
-  return { leadId: lead?.id, created, createdAs, orgCount: Object.keys(orgByBarbourCompanyId).length };
+  return { leadId: lead?.id, created, createdAs, skippedForDeal, orgCount: Object.keys(orgByBarbourCompanyId).length };
 }
 
 // Intersect the project's Barbour material codes with the client's shortlist and

@@ -140,6 +140,29 @@ export function mergeLabelIds(existingPerson, addLabelId) {
   return Array.from(new Set([...existing, addLabelId]));
 }
 
+// Labels to send when updating an existing person. PD v2 `label_ids` REPLACES
+// the whole set, so the merge needs the person's REAL current labels. Records
+// from /v2/persons/search carry no `label_ids` at all — merging into "nothing"
+// used to wipe Wrekin's own labels on every email / name+org adoption. Those
+// are fetched; when the true labels can't be read, labels are left untouched.
+export async function labelsForUpdate(found, addLabelId, { fetchPerson = fetchPersonById } = {}) {
+  if (!addLabelId) return undefined;
+  if (Array.isArray(found?.label_ids)) return mergeLabelIds(found, addLabelId);
+  if (found?.id == null || String(found.id).startsWith('dry-run-')) return undefined;
+  try {
+    const full = await fetchPerson(found.id);
+    return mergeLabelIds({ label_ids: Array.isArray(full?.label_ids) ? full.label_ids : [] }, addLabelId);
+  } catch (err) {
+    logger.warn(`[pd-person] could not read labels for person ${found.id} — leaving labels unchanged: ${err.message}`);
+    return undefined;
+  }
+}
+
+async function fetchPersonById(id) {
+  const res = await requestV2({ method: 'GET', url: `/persons/${id}` }, { label: 'pd-personLabels' });
+  return res.data?.data;
+}
+
 export async function upsertPerson(person, orgId, { addLabelId } = {}) {
   if (!person) return null;
   const hasName = !!(person.first_name || person.last_name);
@@ -151,7 +174,7 @@ export async function upsertPerson(person, orgId, { addLabelId } = {}) {
     const existing = await findPersonByBarbourId(person.person_id);
     if (existing?.id) {
       logger.debug(`[pd-person] updating person ${existing.id}`);
-      return updatePerson(existing.id, person, orgId, { labelIds: mergeLabelIds(existing, addLabelId) });
+      return updatePerson(existing.id, person, orgId, { labelIds: await labelsForUpdate(existing, addLabelId) });
     }
   }
   // 2. Email match — adopts persons the client's team created manually.
@@ -161,7 +184,7 @@ export async function upsertPerson(person, orgId, { addLabelId } = {}) {
       logger.info(
         `[pd-person] adopting existing person ${byEmail.id} for "${person.email}" by email match`,
       );
-      return updatePerson(byEmail.id, person, orgId, { labelIds: mergeLabelIds(byEmail, addLabelId) });
+      return updatePerson(byEmail.id, person, orgId, { labelIds: await labelsForUpdate(byEmail, addLabelId) });
     }
   }
   // 3. Name + org match — covers Barbour persons that arrive without an email
@@ -174,7 +197,7 @@ export async function upsertPerson(person, orgId, { addLabelId } = {}) {
       logger.info(
         `[pd-person] adopting existing person ${byNameOrg.id} for "${name}" @ org ${orgId} by name+org match`,
       );
-      return updatePerson(byNameOrg.id, person, orgId, { labelIds: mergeLabelIds(byNameOrg, addLabelId) });
+      return updatePerson(byNameOrg.id, person, orgId, { labelIds: await labelsForUpdate(byNameOrg, addLabelId) });
     }
   }
   logger.debug(`[pd-person] creating person ${fullName(person)}`);

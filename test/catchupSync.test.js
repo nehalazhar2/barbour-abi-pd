@@ -432,3 +432,24 @@ test('buildCatchupEmail held body tells you to restore the cap', () => {
   const { text } = buildCatchupEmail(baseSummary({ held: true, candidates: 300, heldPids: [1] }));
   assert.ok(text.includes('back to its usual value'));
 });
+
+test('runCatchupSync: a project that already has a Deal is reported, not counted as a new lead', async () => {
+  const { deps } = fakeWorld({ searches: { A: [1, 2] } });
+  const real = deps.processProject;
+  deps.processProject = async (project, o) => (project.project_id === 2 ? { created: false, skippedForDeal: 77 } : real(project, o));
+  const s = await runCatchupSync(deps, opts());
+  assert.equal(s.created, 1);
+  assert.equal(s.foundOnRecheck, 0);
+  assert.deepEqual(s.hasDeal, [{ pid: 2, title: 'Project 2', dealId: 77 }]);
+  const email = buildCatchupEmail(s, opts());
+  assert.match(email.text, /Already a Deal in Pipedrive/);
+  assert.match(email.text, /2 {2}Project 2 {2}\(deal 77\)/);
+});
+
+test('runCatchupSync: tag failure is reported for a deal skip too', async () => {
+  const { deps } = fakeWorld({ searches: { A: [2] } });
+  deps.processProject = async () => ({ created: false, skippedForDeal: 77 });
+  deps.ensureTagOnProject = async () => false;
+  const s = await runCatchupSync(deps, opts());
+  assert.deepEqual(s.tagFailed, [{ pid: 2, title: 'Project 2' }]);
+});

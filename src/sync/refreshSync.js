@@ -112,7 +112,8 @@ export async function runRefreshSync() {
         stats.created += 1;
         if (result.createdAs?.source === 'filter') stats.createdAsFilter += 1; else stats.createdAsTag += 1;
         logger.info(`[refreshSync] project ${project.project_id} had no lead — created as ${result.createdAs?.source}-sync${matched.length ? ` (${matched.join(', ')})` : ''}`);
-      } else stats.updated += 1;
+      } else if (result.skippedForDeal) stats.skippedForDeal = (stats.skippedForDeal || 0) + 1;
+      else stats.updated += 1;
     } catch (err) {
       stats.failed += 1;
       logger.error(
