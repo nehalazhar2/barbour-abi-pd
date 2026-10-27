@@ -1,5 +1,5 @@
-import { requestV1 } from './client.js';
-import { flattenForV1, fields, searchByCustomField } from './customFields.js';
+import { requestV1, requestV2 } from './client.js';
+import { flattenForV1, fields, searchByCustomField, readCustomField } from './customFields.js';
 import { getBarbourSearchOptions, resolveSearchOptionId } from './leadFieldOptions.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
@@ -55,6 +55,40 @@ export async function findLeadByBarbourId(barbourProjectId, { includeDeleted = f
     }
   }
   return { lead: null, viaLegacy: false };
+}
+
+// A Deal for this Barbour project (a converted Lead, or one Wrekin made from it).
+// Lead dedup only searches leads, so without this every create path made a
+// second record for a project sales was already working (15 live, 27 Oct 2026).
+// Checks our own id field and the legacy one (lead fields are deal fields).
+// Deleted deals don't count; a deal whose verify GET 404s is treated as gone.
+// Any other error THROWS — the project fails and retries next run rather than
+// risk a duplicate.
+export async function findDealByBarbourId(barbourProjectId, deps = {}) {
+  const keys = [fields.lead.barbourProjectId, fields.lead.legacyBarbourProjectId].filter(Boolean);
+  if (!keys.length || barbourProjectId == null || barbourProjectId === '') return null;
+  const search = deps.search || (async (term) => {
+    const res = await requestV2(
+      { method: 'GET', url: '/itemSearch', params: { term, item_types: 'deal', fields: 'custom_fields', exact_match: true, limit: 10 } },
+      { label: 'pd-itemSearch-deal' },
+    );
+    return (res.data?.data?.items || []).map((w) => w?.item || w).filter(Boolean);
+  });
+  const getDeal = deps.getDeal || (async (id) => (await requestV2({ method: 'GET', url: `/deals/${id}` }, { label: 'pd-deal-verify' })).data?.data);
+  const want = String(barbourProjectId);
+  for (const item of await search(want)) {
+    let deal;
+    try {
+      deal = await getDeal(item.id);
+    } catch (err) {
+      const status = err?.response?.status;
+      if (status === 404 || status === 410) continue;
+      throw err;
+    }
+    if (!deal || deal.is_deleted === true || deal.active_flag === false) continue;
+    if (keys.some((k) => String(readCustomField(deal, k) ?? '') === want)) return deal;
+  }
+  return null;
 }
 
 // Normalise saved-search names the same way savedSearches.js does so map lookups
@@ -295,8 +329,8 @@ export async function ensureLeadLabels(leadId, expectedLabelIds, { attempts = 4,
   return wrote;
 }
 
-// `found` — a { lead, viaLegacy } the caller already looked up (A4 passes it so
-// each project costs one search, not two).
+// `found` — a { lead, viaLegacy, dealChecked } the caller already looked up, so
+// the lead (and deal) searches aren't repeated.
 export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null, found = null } = {}) {
   const { lead: existing, viaLegacy } = found || await findLeadByBarbourId(project.project_id);
   if (existing?.id) {
@@ -328,6 +362,11 @@ export async function upsertLead(project, primaryOrgId, primaryPersonId, ironwor
       }
       throw err;
     }
+  }
+  const deal = found?.dealChecked ? null : await findDealByBarbourId(project.project_id);
+  if (deal) {
+    logger.warn(`[pd-lead] project ${project.project_id} (${project.project_title || ''}) already has Deal ${deal.id} — not creating a Lead`);
+    return { lead: null, created: false, adopted: false, skippedForDeal: deal.id };
   }
   const cSource = createAs?.source || source;
   const cMatched = createAs?.matchedSearches || matchedSearches;

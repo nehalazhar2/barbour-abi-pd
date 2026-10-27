@@ -64,8 +64,10 @@ test('current: a search-shaped person (no label_ids) is fetched', async () => {
   assert.deepEqual(ids, [USER]);
 });
 
-test('current: a fetched record with no label_ids key means no labels', async () => {
-  assert.deepEqual(await currentLabelIds({ id: 1 }, { fetchPerson: async (id) => ({ id }) }), []);
+test('current: a fetched record with no label_ids (or nothing) is UNKNOWN (null)', async () => {
+  assert.equal(await currentLabelIds({ id: 1 }, { fetchPerson: async (id) => ({ id }) }), null);
+  assert.equal(await currentLabelIds({ id: 1 }, { fetchPerson: async () => undefined }), null);
+  assert.deepEqual(await currentLabelIds({ id: 1 }, { fetchPerson: async (id) => ({ id, label_ids: [] }) }), []);
 });
 
 test('current: a failed fetch is UNKNOWN (null), never []', async () => {

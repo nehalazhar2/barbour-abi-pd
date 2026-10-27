@@ -100,15 +100,18 @@ export function buildCatchupEmail(s) {
     );
   } else {
     L.push(`Created:            ${s.created}`);
-    L.push(`Skipped on recheck: ${s.onCrmTag + s.onAddToCrm + s.foundOnRecheck + s.deletedInPd.length + s.archived.length}` +
+    L.push(`Skipped on recheck: ${s.onCrmTag + s.onAddToCrm + s.foundOnRecheck + s.deletedInPd.length + s.archived.length + (s.hasDeal || []).length}` +
       ` (CRM tag ${s.onCrmTag}, Add to CRM ${s.onAddToCrm}, lead found ${s.foundOnRecheck},` +
-      ` deleted ${s.deletedInPd.length}, archived ${s.archived.length})`);
+      ` deleted ${s.deletedInPd.length}, archived ${s.archived.length}, already a Deal ${(s.hasDeal || []).length})`);
     L.push(`Failed:             ${s.failed}`, '');
     if (s.createdList.length) {
       L.push('New leads:', ...listPids(s.createdList, (c) => `${c.pid}  ${c.title || ''}`), '');
     }
+    if (s.hasDeal?.length) {
+      L.push('Already a Deal in Pipedrive — no Lead created:', ...listPids(s.hasDeal, (x) => `${x.pid}  ${x.title || ''}  (deal ${x.dealId})`), '');
+    }
     if (s.tagFailed.length) {
-      L.push('⚠ Created but the CRM tag could not be added in Barbour — add it by hand, or the daily',
+      L.push('⚠ Created (or skipped as a Deal) but the CRM tag could not be added in Barbour — add it by hand, or the daily',
         'refresh won\'t track these and a later deletion could be re-imported:',
         ...listPids(s.tagFailed, (x) => `${x.pid}  ${x.title || ''}`), '');
     }
@@ -203,6 +206,7 @@ export async function runCatchupSync(deps = defaultDeps, opts = optsFromConfig()
     failed: 0,
     failures: [],
     tagFailed: [],
+    hasDeal: [],
     capped: 0,
     budgetStopped: false,
     remaining: 0,
@@ -311,6 +315,9 @@ export async function runCatchupSync(deps = defaultDeps, opts = optsFromConfig()
         s.created += 1;
         s.createdList.push({ pid, title: project.project_title });
         logger.info(`[catchupSync] created lead for ${pid} "${project.project_title || ''}" [${searches.join(', ')}]`);
+      } else if (result?.skippedForDeal) {
+        s.hasDeal.push({ pid, title: project.project_title, dealId: result.skippedForDeal });
+        logger.info(`[catchupSync] ${pid} already has Deal ${result.skippedForDeal} — no lead created`);
       } else {
         // processProject found a lead the recheck didn't (e.g. via the legacy
         // field) and updated it. Not a new lead — don't report it as one.
@@ -323,7 +330,7 @@ export async function runCatchupSync(deps = defaultDeps, opts = optsFromConfig()
       // ensureTagOnProject also returns on a swallowed error) means it failed.
       // Under DRY_RUN the add is skipped but still reported as added.
       const tagged = await deps.ensureTagOnProject(pid, crmTagId);
-      if (!tagged && result?.created) {
+      if (!tagged && (result?.created || result?.skippedForDeal)) {
         s.tagFailed.push({ pid, title: project.project_title });
         logger.warn(`[catchupSync] ${pid} created but the CRM tag could not be applied — add it in Barbour`);
       }

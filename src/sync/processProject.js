@@ -5,7 +5,7 @@ import { getSectorName, resolveMaterialNames } from '../barbourabi/lookups.js';
 import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
 import { upsertOrg, updateOrg } from '../pipedrive/organisations.js';
 import { makePersonUpserter, contactLabelIds, walkLabelKind } from '../pipedrive/persons.js';
-import { upsertLead, findLeadByBarbourId, ArchivedLeadError, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
+import { upsertLead, findLeadByBarbourId, findDealByBarbourId, ArchivedLeadError, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
 import { buildClassificationFields } from './leadClassification.js';
 
@@ -150,15 +150,26 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   const issues = [];
   const issue = (stage, err) => issues.push({ stage, message: err?.message || String(err) });
 
-  let found = null;
-  if (noCreate) {
-    // strict: a failed lookup must fail the project, not read as "no lead".
-    found = await findLeadByBarbourId(projectId, { strict: true });
-    if (!found?.lead?.id) return { leadId: undefined, created: false, missingLead: true, issues };
-    // Archived leads can't be updated — say so before touching its orgs/persons.
-    if (found.lead.is_archived === true) throw new ArchivedLeadError(found.lead, project);
-  }
   const projectValue = Number(project.project_value) || 0;
+
+  // Lead first (one search, handed to upsertLead). With no lead:
+  //   noCreate (A4) → nothing written, `missingLead` (deleted in PD since listing);
+  //   otherwise, a project that already has a Deal gets nothing written at all —
+  //   no orgs, persons or labels for a record sales is working elsewhere.
+  // strict under noCreate: a failed lookup must fail the project, not read as "no lead".
+  const found = await findLeadByBarbourId(projectId, noCreate ? { strict: true } : undefined);
+  if (!found?.lead?.id) {
+    if (noCreate) return { leadId: undefined, created: false, missingLead: true, issues };
+    const deal = await findDealByBarbourId(projectId);
+    if (deal) {
+      logger.warn(`[process] project ${projectId} (${projectTitle}) already has Deal ${deal.id} — no Lead created, nothing written`);
+      return { leadId: undefined, created: false, skippedForDeal: deal.id, orgCount: 0, issues };
+    }
+  } else if (noCreate && found.lead.is_archived === true) {
+    // Archived leads can't be updated — say so before touching its orgs/persons.
+    throw new ArchivedLeadError(found.lead, project);
+  }
+  const foundChecked = { ...found, dealChecked: true };
 
   // Bucket the value into Ironworks / Geoworks based on which materials the
   // project carries. When either bucket's material list is empty (env var not
@@ -374,7 +385,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   // depend on roles). Empty object when the fields aren't configured.
   const classificationFieldValues = await buildClassificationFields(project);
 
-  const { lead, created, createdAs } = await upsertLead(
+  const { lead, created, createdAs, skippedForDeal } = await upsertLead(
     project,
     primaryOrgId,
     primaryPersonId,
@@ -383,7 +394,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     ownerId,
     source,
     { ...roleOrgFieldValues, ...classificationFieldValues },
-    { preserveOwner, preserveLabels, matchedSearches, createAs, found },
+    { preserveOwner, preserveLabels, matchedSearches, createAs, found: foundChecked },
   );
 
   // Post-lead housekeeping — always wipe our own integration notes first (both
@@ -418,7 +429,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     }
   }
 
-  return { leadId: lead?.id, created, createdAs, orgCount: Object.keys(orgByBarbourCompanyId).length, issues };
+  return { leadId: lead?.id, created, createdAs, skippedForDeal, orgCount: Object.keys(orgByBarbourCompanyId).length, issues };
 }
 
 // Intersect the project's Barbour material codes with the client's shortlist and

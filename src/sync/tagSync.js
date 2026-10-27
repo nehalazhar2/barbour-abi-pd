@@ -51,6 +51,7 @@ export async function runTagSync() {
       const ownerId = await resolveOwnerFromTagger(project.project_id, addTagId);
       const result = await processProject(project, { ownerId, source: 'tag' });
       if (result.created) stats.created += 1;
+      else if (result.skippedForDeal) stats.skippedForDeal = (stats.skippedForDeal || 0) + 1;
       else stats.updated += 1;
 
       try {

@@ -377,7 +377,7 @@ async function runRefreshPhase(run, report) {
         }
       }
       const result = await processProject(project, { source: 'refresh', preserveOwner: true, preserveLabels: true });
-      if (result.created) s.created += 1; else s.updated += 1;
+      if (result.created) s.created += 1; else if (result.skippedForDeal) s.skippedForDeal = (s.skippedForDeal || 0) + 1; else s.updated += 1;
       s.lastItem = `${pid} ${project.project_title || ''}`.slice(0, 110);
     } catch (err) {
       if (isArchivedLeadError(err)) {
@@ -473,7 +473,7 @@ async function runFilterPhase(run, report) {
       if (!project) throw new Error('project not found on Barbour');
       const matched = searchesByProject.get(pid) || [];
       const result = await processProject(project, { source: 'filter', matchedSearches: matched });
-      if (result.created) s.created += 1; else s.updated += 1;
+      if (result.created) s.created += 1; else if (result.skippedForDeal) s.skippedForDeal = (s.skippedForDeal || 0) + 1; else s.updated += 1;
       if (crmTagId) {
         try { await ensureTagOnProject(pid, crmTagId); } catch (e) {
           logger.warn(`[backfill:filter] tag apply failed for ${pid}: ${e.message}`);

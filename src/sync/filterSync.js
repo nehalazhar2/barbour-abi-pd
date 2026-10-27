@@ -92,6 +92,7 @@ export async function runFilterSync() {
       const matchedSearches = searchesByProject.get(project.project_id) || [];
       const result = await processProject(project, { source: 'filter', matchedSearches });
       if (result.created) stats.created += 1;
+      else if (result.skippedForDeal) stats.skippedForDeal = (stats.skippedForDeal || 0) + 1;
       else stats.updated += 1;
 
       // Tag on Barbour AFTER a successful process so refreshSync will keep the

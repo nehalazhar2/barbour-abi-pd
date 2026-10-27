@@ -186,7 +186,12 @@ export async function currentLabelIds(person, { fetchPerson = getPersonById } = 
   if (String(person.id).startsWith('dry-run')) return null;
   try {
     const full = await fetchPerson(person.id);
-    return Array.isArray(full?.label_ids) ? full.label_ids : [];
+    // No label_ids in the answer means we still don't know them — don't guess.
+    if (!Array.isArray(full?.label_ids)) {
+      logger.warn(`[pd-person] person ${person.id} came back without label_ids — leaving labels unchanged`);
+      return null;
+    }
+    return full.label_ids;
   } catch (err) {
     logger.warn(`[pd-person] could not read labels for person ${person.id} — leaving labels unchanged: ${err.message}`);
     return null;
