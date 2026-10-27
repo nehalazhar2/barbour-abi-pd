@@ -151,7 +151,12 @@ export async function labelsForUpdate(found, addLabelId, { fetchPerson = fetchPe
   if (found?.id == null || String(found.id).startsWith('dry-run-')) return undefined;
   try {
     const full = await fetchPerson(found.id);
-    return mergeLabelIds({ label_ids: Array.isArray(full?.label_ids) ? full.label_ids : [] }, addLabelId);
+    // No label_ids in the answer means we still don't know them — don't guess.
+    if (!Array.isArray(full?.label_ids)) {
+      logger.warn(`[pd-person] person ${found.id} came back without label_ids — leaving labels unchanged`);
+      return undefined;
+    }
+    return mergeLabelIds(full, addLabelId);
   } catch (err) {
     logger.warn(`[pd-person] could not read labels for person ${found.id} — leaving labels unchanged: ${err.message}`);
     return undefined;

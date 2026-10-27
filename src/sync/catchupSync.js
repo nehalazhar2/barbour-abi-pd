@@ -99,7 +99,7 @@ export function buildCatchupEmail(s) {
     );
   } else {
     L.push(`Created:            ${s.created}`);
-    L.push(`Skipped on recheck: ${s.onCrmTag + s.onAddToCrm + s.foundOnRecheck + s.deletedInPd.length + s.archived.length}` +
+    L.push(`Skipped on recheck: ${s.onCrmTag + s.onAddToCrm + s.foundOnRecheck + s.deletedInPd.length + s.archived.length + (s.hasDeal || []).length}` +
       ` (CRM tag ${s.onCrmTag}, Add to CRM ${s.onAddToCrm}, lead found ${s.foundOnRecheck},` +
       ` deleted ${s.deletedInPd.length}, archived ${s.archived.length}, already a Deal ${(s.hasDeal || []).length})`);
     L.push(`Failed:             ${s.failed}`, '');

@@ -1,9 +1,11 @@
 // Production hotfix (27 Oct 2026): person labels on adoption + Deal-aware lead create. No network.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { labelsForUpdate } from '../src/pipedrive/persons.js';
-import { findDealByBarbourId } from '../src/pipedrive/leads.js';
-import { fields } from '../src/pipedrive/customFields.js';
+// Deal tests need the Barbour id field key; give it one when .env isn't loaded (CI).
+process.env.PD_FIELD_LEAD_BARBOUR_ID ||= 'testBarbourIdKey';
+const { labelsForUpdate } = await import('../src/pipedrive/persons.js');
+const { findDealByBarbourId } = await import('../src/pipedrive/leads.js');
+const { fields } = await import('../src/pipedrive/customFields.js');
 
 const POOP = 1066;
 const USER = 1009;
@@ -30,8 +32,10 @@ test('labels: search-shaped record (no label_ids) fetches the real labels — th
   assert.deepEqual(r.sort(), [USER, POOP].sort());
 });
 
-test('labels: fetched record without label_ids → just the new label', async () => {
-  assert.deepEqual(await labelsForUpdate({ id: 5 }, POOP, { fetchPerson: async () => ({ id: 5 }) }), [POOP]);
+test('labels: fetched record without label_ids (or no record) → undefined, labels untouched', async () => {
+  assert.equal(await labelsForUpdate({ id: 5 }, POOP, { fetchPerson: async () => ({ id: 5 }) }), undefined);
+  assert.equal(await labelsForUpdate({ id: 5 }, POOP, { fetchPerson: async () => undefined }), undefined);
+  assert.deepEqual(await labelsForUpdate({ id: 5 }, POOP, { fetchPerson: async () => ({ id: 5, label_ids: [] }) }), [POOP]);
 });
 
 test('labels: fetch fails → undefined (never clobber on unknown)', async () => {
@@ -52,16 +56,16 @@ const KEY = fields.lead.barbourProjectId;
 const dealWith = (id, pid, extra = {}) => ({ id, custom_fields: { [KEY]: pid }, ...extra });
 const http = (status) => Object.assign(new Error(`status ${status}`), { response: { status } });
 
-test('deal: found when the verified deal carries the id', { skip: !KEY && 'PD_FIELD_LEAD_BARBOUR_ID not set' }, async () => {
+test('deal: found when the verified deal carries the id', async () => {
   const d = await findDealByBarbourId(123, { search: async () => [{ id: 9 }], getDeal: async (id) => dealWith(id, '123') });
   assert.equal(d.id, 9);
 });
 
-test('deal: a search hit on a different field is not a match', { skip: !KEY && 'no key' }, async () => {
+test('deal: a search hit on a different field is not a match', async () => {
   assert.equal(await findDealByBarbourId(123, { search: async () => [{ id: 9 }], getDeal: async (id) => dealWith(id, '999') }), null);
 });
 
-test('deal: deleted deals and 404/410 verify are "no deal"', { skip: !KEY && 'no key' }, async () => {
+test('deal: deleted deals and 404/410 verify are "no deal"', async () => {
   const deps = {
     search: async () => [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }],
     getDeal: async (id) => {
@@ -74,7 +78,7 @@ test('deal: deleted deals and 404/410 verify are "no deal"', { skip: !KEY && 'no
   assert.equal(await findDealByBarbourId(123, deps), null);
 });
 
-test('deal: any other verify error throws (never guess → duplicate)', { skip: !KEY && 'no key' }, async () => {
+test('deal: any other verify error throws (never guess → duplicate)', async () => {
   await assert.rejects(findDealByBarbourId(123, { search: async () => [{ id: 1 }], getDeal: async () => { throw http(503); } }), /503/);
 });
 

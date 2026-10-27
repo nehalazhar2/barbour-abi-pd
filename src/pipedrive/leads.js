@@ -329,8 +329,10 @@ export async function ensureLeadLabels(leadId, expectedLabelIds, { attempts = 4,
   return wrote;
 }
 
-export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null } = {}) {
-  const { lead: existing, viaLegacy } = await findLeadByBarbourId(project.project_id);
+// `found` — a { lead, viaLegacy, dealChecked } the caller already looked up, so
+// the lead (and deal) searches aren't repeated.
+export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null, found = null } = {}) {
+  const { lead: existing, viaLegacy } = found || await findLeadByBarbourId(project.project_id);
   if (existing?.id) {
     if (existing.is_archived === true) {
       logger.warn(
@@ -361,7 +363,7 @@ export async function upsertLead(project, primaryOrgId, primaryPersonId, ironwor
       throw err;
     }
   }
-  const deal = await findDealByBarbourId(project.project_id);
+  const deal = found?.dealChecked ? null : await findDealByBarbourId(project.project_id);
   if (deal) {
     logger.warn(`[pd-lead] project ${project.project_id} (${project.project_title || ''}) already has Deal ${deal.id} — not creating a Lead`);
     return { lead: null, created: false, adopted: false, skippedForDeal: deal.id };

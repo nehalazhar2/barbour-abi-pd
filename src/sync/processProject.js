@@ -5,7 +5,7 @@ import { getSectorName, resolveMaterialNames } from '../barbourabi/lookups.js';
 import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
 import { upsertOrg, updateOrg } from '../pipedrive/organisations.js';
 import { upsertPerson, updatePerson, mergeLabelIds } from '../pipedrive/persons.js';
-import { upsertLead, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
+import { upsertLead, findLeadByBarbourId, findDealByBarbourId, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
 
 // Pack associated orgs into the ordered leadOrgSlots array. Primary org goes into
@@ -125,6 +125,19 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   const projectId = project.project_id;
   const projectTitle = project.project_title || `Barbour project ${projectId}`;
   const projectValue = Number(project.project_value) || 0;
+
+  // Lead first, then — only if there's no lead — a Deal for the same project.
+  // A project that already has a Deal gets nothing written at all: no orgs,
+  // persons or labels for a record sales is already working elsewhere.
+  const found = await findLeadByBarbourId(projectId);
+  if (!found?.lead?.id) {
+    const deal = await findDealByBarbourId(projectId);
+    if (deal) {
+      logger.warn(`[process] project ${projectId} (${projectTitle}) already has Deal ${deal.id} — no Lead created, nothing written`);
+      return { leadId: undefined, created: false, skippedForDeal: deal.id, orgCount: 0 };
+    }
+  }
+  const foundChecked = { ...found, dealChecked: true };
 
   // Bucket the value into Ironworks / Geoworks based on which materials the
   // project carries. When either bucket's material list is empty (env var not
@@ -341,7 +354,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     ownerId,
     source,
     roleOrgFieldValues,
-    { preserveOwner, preserveLabels, matchedSearches, createAs },
+    { preserveOwner, preserveLabels, matchedSearches, createAs, found: foundChecked },
   );
 
   // Post-lead housekeeping — always wipe our own integration notes first (both
