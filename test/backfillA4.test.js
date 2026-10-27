@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseWindow, inWindow, londonMinutes, windowTouchesCron, buildLeadWorkList, createGate, runLeadsPhase, runRollupPhase,
+  parseWindow, inWindow, londonMinutes, windowTouchesCron, checkBackfillWindow, buildLeadWorkList, createGate, runLeadsPhase, runRollupPhase,
 } from '../src/sync/backfillReprocess.js';
 import { createRunLock } from '../src/utils/runLock.js';
 
@@ -240,7 +240,7 @@ test('rollup phase: uncapped, result recorded', async () => {
   await runRollupPhase(run, async () => {}, {
     opts: { maxWrites: 1500, valueKey: 'v' },
     rollupDeps: { writeOrgRollup: async () => {} },
-    runRollupSync: async (d, o) => { seenOpts = o; return { orgs: 10, written: 4, failed: 0 }; },
+    runRollupSync: async (d, o) => { seenOpts = o; for (let i = 0; i < 4; i += 1) await d.writeOrgRollup(i); return { orgs: 10, candidates: 4, written: 4, failed: 0 }; },
     gate: async () => {},
     inWindowNow: () => true,
   });
@@ -266,7 +266,7 @@ test('rollup phase: leaving the window stops writes and re-plans fresh after the
   const written = [];
   const runRollupSync = async (d) => {
     passes += 1;
-    const res = { orgs: 3, written: 0, failed: 0 };
+    const res = { orgs: 3, candidates: passes === 1 ? 3 : 2, written: 0, failed: 0 };
     for (const org of passes === 1 ? [1, 2, 3] : [2, 3]) {
       try { await d.writeOrgRollup(org); res.written += 1; } catch { res.failed += 1; }
       if (org === 1) inside = false; // window closes after the first write
@@ -282,7 +282,8 @@ test('rollup phase: leaving the window stops writes and re-plans fresh after the
   });
   assert.deepEqual(written, [1, 2, 3], 'nothing written outside the window');
   assert.equal(passes, 2);
-  assert.equal(run.stats.rollup.written, 2, 'stats come from the final pass');
+  assert.equal(run.stats.rollup.written, 3, 'written summed across passes (1 + 2)');
+  assert.equal(run.stats.rollup.candidates, 3, 'candidates from the first pass');
   assert.equal(run.stats.rollup.failed, 0, 'pause-aborted writes are not failures');
   assert.equal(run.stats.rollup.passes, 2);
   assert.equal(gates, 2);
@@ -311,4 +312,30 @@ test('runLock: one holder at a time; release by holder only', () => {
   lock.release('daily');
   assert.equal(lock.holder(), null);
   assert.equal(lock.tryAcquire('a4'), true);
+});
+
+// ---------------------------------------------------------------------------
+// Code-review fixes (A4)
+// ---------------------------------------------------------------------------
+
+test('checkBackfillWindow: refuses phases that cannot pause, and a window near a cron', () => {
+  const w = parseWindow('19:00-06:15');
+  assert.throws(() => checkBackfillWindow({ window: w, phases: ['refresh', 'search'] }), /leads,rollup/);
+  assert.throws(() => checkBackfillWindow({ window: w, phases: ['leads', 'filter'] }), /filter/);
+  assert.throws(() => checkBackfillWindow({ window: parseWindow('19:00-06:45'), phases: ['leads'], crons: ['0 7 * * *'] }), /overlaps/);
+  assert.doesNotThrow(() => checkBackfillWindow({ window: w, phases: ['leads', 'rollup'], crons: ['0 7 * * *', '0 9 * * 0'] }));
+});
+
+test('work list: own id wins when the legacy field disagrees (never two projects for one lead)', () => {
+  const { pids } = buildLeadWorkList([{ id: 'a', [KEY]: '7', [LEGACY]: '8' }], { keys: [KEY, LEGACY] });
+  assert.deepEqual(pids, [7]);
+});
+
+test('leads phase: an empty Barbour body is "gone from Barbour", not "deleted in PD"', async () => {
+  const { calls, deps } = leadsWorld({ 1: 'ok' });
+  deps.getProjectById = async () => ({});
+  const run = { stats: {} };
+  await runLeadsPhase(run, async () => {}, deps);
+  assert.deepEqual(run.stats.leads.missingOnBarbour.map((m) => m.pid), [1]);
+  assert.equal(calls.processed.length, 0);
 });

@@ -549,6 +549,17 @@ export function windowTouchesCron(w, cronExpr, bufferMin = 30) {
   return false;
 }
 
+// Boot-time check for a windowed run. Throws (→ backfill not started, cron keeps
+// running) when the window comes within 30 min of a cron, or when a phase that
+// can't pause (filter/search/refresh — no window, no lock) is selected: those
+// would run straight into the 07:00 run.
+export function checkBackfillWindow({ window, phases, crons = [] }) {
+  const ungated = phases.filter((p) => p !== 'leads' && p !== 'rollup');
+  if (ungated.length) throw new Error(`BACKFILL_WINDOW only works with BACKFILL_PHASES=leads,rollup — ${ungated.join(', ')} cannot pause; unset BACKFILL_WINDOW to run them`);
+  const clash = crons.find((c) => windowTouchesCron(window, c));
+  if (clash) throw new Error(`BACKFILL_WINDOW ${window.label} overlaps (or ends <30 min before) cron "${clash}"`);
+}
+
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // gate() — call before each unit of work. No window: returns at once (legacy
@@ -587,8 +598,10 @@ export function buildLeadWorkList(leads, { keys, startAfter = 0, max = 0 }) {
   const leadsByPid = new Map();
   for (const l of leads) {
     if (l.is_archived) continue;
-    const pids = new Set(useKeys.map((k) => Number(l[k])).filter((n) => Number.isFinite(n) && n > 0));
-    for (const pid of pids) {
+    // First key with a value wins (own field, then legacy) — a lead whose two
+    // fields disagree must not be processed as two projects.
+    const pid = useKeys.map((k) => Number(l[k])).find((n) => Number.isFinite(n) && n > 0);
+    if (pid) {
       const ids = leadsByPid.get(pid) || [];
       ids.push(l.id);
       leadsByPid.set(pid, ids);
@@ -627,7 +640,7 @@ export async function runLeadsPhase(run, report, deps) {
       } catch (err) {
         if (!isNotFound(err)) throw err;
       }
-      if (!project) {
+      if (!project?.project_id) {
         s.missingOnBarbour.push({ pid });
         logger.warn(`[backfill:leads] ${pid} — no longer on Barbour, lead left as is`);
       } else {
@@ -674,7 +687,7 @@ export async function runLeadsPhase(run, report, deps) {
 // no-op, and after the pause the roll-up is planned again from fresh reads —
 // orgs already written match their hash and are skipped.
 export async function runRollupPhase(run, report, deps) {
-  const s = { startedAt: Date.now(), passes: 0 };
+  const s = { startedAt: Date.now(), passes: 0, written: 0, failed: 0 };
   run.stats.rollup = s;
   run.currentPhase = 'rollup';
   try {
@@ -691,9 +704,16 @@ export async function runRollupPhase(run, report, deps) {
         }
         await deps.rollupDeps.writeOrgRollup(...args);
       };
-      const res = await deps.runRollupSync({ ...deps.rollupDeps, writeOrgRollup }, { ...deps.opts, maxWrites: Infinity });
+      let written = 0;
+      const counted = async (...args) => { await writeOrgRollup(...args); if (!paused) written += 1; };
+      const res = await deps.runRollupSync({ ...deps.rollupDeps, writeOrgRollup: counted }, { ...deps.opts, maxWrites: Infinity });
+      if (res?.skipped) { s.skipped = true; break; }
+      // Totals across passes: the first pass saw how many orgs needed a change;
+      // later passes only see what's left.
+      if (s.candidates === undefined) Object.assign(s, { orgs: res.orgs, candidates: res.candidates });
+      s.written += written;
+      s.failed += res.failed;
       if (paused) continue;
-      Object.assign(s, res);
       break;
     }
   } catch (err) {
@@ -736,10 +756,7 @@ export async function runBackfillReprocess({ window = null, lock = null } = {}) 
   const unknown = config.backfill.phases.filter((p) => !PHASES[p]);
   if (unknown.length) logger.warn(`[backfill] ignoring unknown phase(s): ${unknown.join(', ')}`);
   if (!phases.length) throw new Error(`BACKFILL_PHASES has no valid phases (${Object.keys(PHASES).join(', ')})`);
-  if (window) {
-    const ungated = phases.filter((p) => p !== 'leads' && p !== 'rollup');
-    if (ungated.length) logger.warn(`[backfill] BACKFILL_WINDOW only applies to the leads and rollup phases — ${ungated.join(', ')} will run straight through`);
-  }
+  if (window) checkBackfillWindow({ window, phases });
 
   const run = { startedAt: Date.now(), phases, currentPhase: null, stats: {}, window: window?.label };
   resetClassificationRun();

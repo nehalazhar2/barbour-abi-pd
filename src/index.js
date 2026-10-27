@@ -5,7 +5,7 @@ import { sendFailureAlert } from './utils/alerts.js';
 import { runTagSync } from './sync/tagSync.js';
 import { runFilterSync } from './sync/filterSync.js';
 import { runRefreshSync } from './sync/refreshSync.js';
-import { runBackfillReprocess, parkForever, parseWindow, windowTouchesCron } from './sync/backfillReprocess.js';
+import { runBackfillReprocess, parkForever, parseWindow, checkBackfillWindow } from './sync/backfillReprocess.js';
 import { runLock } from './utils/runLock.js';
 import { resetSavedSearchCache } from './barbourabi/savedSearches.js';
 import { resetTagCache } from './barbourabi/tags.js';
@@ -143,9 +143,11 @@ function start() {
     let window;
     try {
       window = parseWindow(config.backfill.window);
-      const crons = [config.schedule.cron, ...(config.catchup.enabled ? [config.catchup.cron] : [])];
-      const clash = crons.find((c) => windowTouchesCron(window, c));
-      if (clash) throw new Error(`BACKFILL_WINDOW ${window.label} overlaps (or ends <30 min before) cron "${clash}"`);
+      checkBackfillWindow({
+        window,
+        phases: config.backfill.phases,
+        crons: [config.schedule.cron, ...(config.catchup.enabled ? [config.catchup.cron] : [])],
+      });
     } catch (err) {
       // Config error: don't start the backfill, keep the normal cron running.
       logger.error(`[index] backfill NOT started — ${err.message}`);

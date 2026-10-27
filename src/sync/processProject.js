@@ -152,7 +152,8 @@ export async function processProject(project, { ownerId, source, preserveOwner =
 
   let found = null;
   if (noCreate) {
-    found = await findLeadByBarbourId(projectId);
+    // strict: a failed lookup must fail the project, not read as "no lead".
+    found = await findLeadByBarbourId(projectId, { strict: true });
     if (!found?.lead?.id) return { leadId: undefined, created: false, missingLead: true, issues };
     // Archived leads can't be updated — say so before touching its orgs/persons.
     if (found.lead.is_archived === true) throw new ArchivedLeadError(found.lead, project);
