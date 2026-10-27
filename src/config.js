@@ -301,6 +301,14 @@ export const config = {
     // skipped cheaply, so the next run continues where this one stopped.
     maxRuntimeMinutes: parseInt(process.env.BACKFILL_MAX_RUNTIME_MINUTES || '0', 10),
     refreshSkipExisting: (process.env.BACKFILL_REFRESH_SKIP_EXISTING || '').toLowerCase() === 'true',
+    // Phase 2 / A4. BACKFILL_WINDOW = "HH:MM-HH:MM" London (e.g. 19:00-06:15):
+    // the leads + rollup phases only work inside it, across as many nights as it
+    // takes, with the daily cron running as normal in between. Unset = run
+    // straight through. Parsed (and checked against the crons) in index.js.
+    window: (process.env.BACKFILL_WINDOW || '').trim(),
+    // Manual resume for the leads phase after a container restart: the last pid
+    // shown in the progress email.
+    leadsStartAfter: parseNonNegativeInt('BACKFILL_LEADS_START_AFTER', 0),
     phases: (process.env.BACKFILL_PHASES || 'refresh,search')
       .split(',')
       .map((s) => s.trim().toLowerCase())

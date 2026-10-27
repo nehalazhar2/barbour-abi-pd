@@ -5,7 +5,7 @@ import { getSectorName, resolveMaterialNames } from '../barbourabi/lookups.js';
 import { getCompanyPeople, normalisePerson } from '../barbourabi/companies.js';
 import { upsertOrg, updateOrg } from '../pipedrive/organisations.js';
 import { makePersonUpserter, contactLabelIds, walkLabelKind } from '../pipedrive/persons.js';
-import { upsertLead, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
+import { upsertLead, findLeadByBarbourId, ArchivedLeadError, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
 import { buildClassificationFields } from './leadClassification.js';
 
@@ -137,9 +137,26 @@ function contactLabelOpts(kind) {
   return contactLabelsOn ? { labelsFor: (current) => contactLabelIds(current, kind, contactLabelCfg) } : {};
 }
 
-export async function processProject(project, { ownerId, source, preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null } = {}) {
+// `noCreate` (Phase 2 / A4): update an existing lead only. The lead is looked up
+// FIRST and, if it's gone (deleted in PD since the caller listed it), nothing is
+// written at all — no orgs, no persons — and `{ missingLead: true }` comes back.
+//
+// Errors on orgs, persons and notes are logged and swallowed so one bad contact
+// doesn't sink the lead; each one is also returned in `issues` so a caller that
+// must prove "zero failures" (A4) can count them.
+export async function processProject(project, { ownerId, source, preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null, noCreate = false } = {}) {
   const projectId = project.project_id;
   const projectTitle = project.project_title || `Barbour project ${projectId}`;
+  const issues = [];
+  const issue = (stage, err) => issues.push({ stage, message: err?.message || String(err) });
+
+  let found = null;
+  if (noCreate) {
+    found = await findLeadByBarbourId(projectId);
+    if (!found?.lead?.id) return { leadId: undefined, created: false, missingLead: true, issues };
+    // Archived leads can't be updated — say so before touching its orgs/persons.
+    if (found.lead.is_archived === true) throw new ArchivedLeadError(found.lead, project);
+  }
   const projectValue = Number(project.project_value) || 0;
 
   // Bucket the value into Ironworks / Geoworks based on which materials the
@@ -256,10 +273,12 @@ export async function processProject(project, { ownerId, source, preserveOwner =
           }
         } catch (err) {
           logger.error(`[process] failed to upsert person under ${role.company_name}: ${err.message}`);
+          issue(`person @ ${role.company_name}`, err);
         }
       }
     } catch (err) {
       logger.error(`[process] failed to upsert org ${role.company_name}: ${err.message}`);
+      issue(`org ${role.company_name}`, err);
     }
   }
 
@@ -339,6 +358,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
           logger.warn(
             `[process] PoOP upsert failed for ${p.person_first_name || ''} ${p.person_last_name || ''} at ${role.company_name}: ${err.message}`,
           );
+          issue(`company contact @ ${role.company_name}`, err);
         }
       }
     }
@@ -362,7 +382,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
     ownerId,
     source,
     { ...roleOrgFieldValues, ...classificationFieldValues },
-    { preserveOwner, preserveLabels, matchedSearches, createAs },
+    { preserveOwner, preserveLabels, matchedSearches, createAs, found },
   );
 
   // Post-lead housekeeping — always wipe our own integration notes first (both
@@ -375,10 +395,11 @@ export async function processProject(project, { ownerId, source, preserveOwner =
       if (cleared > 0) logger.debug(`[process] cleared ${cleared} integration note(s) on lead ${lead.id}`);
     } catch (err) {
       logger.warn(`[process] could not clear legacy notes on lead ${lead.id}: ${err.message}`);
+      issue('clear notes', err);
     }
     // Materials note is derived from Barbour data and regenerated every sync so
     // it stays fresh (Ben's explicit ask: "Barbour info would be most recent").
-    await maybeWriteMaterialsNote(lead.id, project);
+    await maybeWriteMaterialsNote(lead.id, project, issue);
 
     // Freshly created leads have been observed losing every label but the first
     // within seconds of creation — the timing lines up with the note writes
@@ -391,18 +412,19 @@ export async function processProject(project, { ownerId, source, preserveOwner =
         await ensureLeadLabels(lead.id, labelIdsForSource(cs.source, cs.matchedSearches));
       } catch (err) {
         logger.warn(`[process] could not re-assert labels on new lead ${lead.id}: ${err.message}`);
+        issue('lead labels', err);
       }
     }
   }
 
-  return { leadId: lead?.id, created, createdAs, orgCount: Object.keys(orgByBarbourCompanyId).length };
+  return { leadId: lead?.id, created, createdAs, orgCount: Object.keys(orgByBarbourCompanyId).length, issues };
 }
 
 // Intersect the project's Barbour material codes with the client's shortlist and
 // write a Note on the Lead listing the matched names. No-op when the shortlist
 // isn't configured or nothing matched — the empty case shouldn't create a
 // misleading "no matches" note.
-async function maybeWriteMaterialsNote(leadId, project) {
+async function maybeWriteMaterialsNote(leadId, project, issue = () => {}) {
   const shortlist = config.barbourabi.materialsShortlist || [];
   if (shortlist.length === 0) return;
   const projectCodes = Array.isArray(project.project_materials) ? project.project_materials : [];
@@ -434,6 +456,7 @@ async function maybeWriteMaterialsNote(leadId, project) {
     );
   } catch (err) {
     logger.warn(`[process] materials note write failed on lead ${leadId}: ${err.message}`);
+    issue('materials note', err);
   }
 }
 

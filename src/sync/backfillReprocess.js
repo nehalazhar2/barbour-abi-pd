@@ -11,6 +11,7 @@ import { getProjectsByQuery, getTaggedProjects, getProjectById } from '../barbou
 import { getTagIdByName, ensureTagOnProject } from '../barbourabi/tags.js';
 import { isArchivedLeadError, findLeadByBarbourId, listAllLeads } from '../pipedrive/leads.js';
 import { processProject } from './processProject.js';
+import { runRollupSync, defaultDeps as rollupDefaultDeps, optsFromConfig as rollupOptsFromConfig } from './rollupSync.js';
 import { resetClassificationRun } from './leadClassification.js';
 
 // One-off re-process of the existing Pipedrive data so records imported before the
@@ -100,9 +101,18 @@ function buildEmail(run, note) {
     `Now:       ${run.currentPhase || 'n/a'}`,
     ``,
   ];
+  if (run.window) lines.splice(lines.length - 1, 0, `Window:    ${run.window} London (pauses outside it; daily sync runs as normal)`);
   for (const ph of run.phases) {
     const s = run.stats[ph];
     if (!s) { lines.push(`[${ph}]  pending`, ``); continue; }
+    if (ph === 'rollup') {
+      lines.push(`[rollup]  ${s.finishedAt ? 'COMPLETE' : 'running'}${s.passes > 1 ? `  (${s.passes} passes — paused by the window)` : ''}`);
+      if (s.skipped) lines.push(`   skipped — roll-up fields not configured`);
+      else if (s.error) lines.push(`   ❌ FAILED: ${s.error}`);
+      else if (s.finishedAt) lines.push(`   organisations ${s.orgs}   needed a change ${s.candidates}   written ${s.written}   failed ${s.failed}`);
+      lines.push(``);
+      continue;
+    }
     const done = s.processed + s.skippedPrevRun;
     const elapsedMs = (s.finishedAt || Date.now()) - s.startedAt;
     const rate = s.processed > 0 ? s.processed / (elapsedMs / 60000) : 0;
@@ -114,6 +124,9 @@ function buildEmail(run, note) {
     if (ph === 'filter') {
       lines.push(`   created ${s.created}   already-had-a-lead (skipped) ${s.skippedExisting}   archived ${s.archived}   failed ${s.failed}`);
       if (s.budgetStopped) lines.push(`   ⏳ STOPPED ON RUNTIME BUDGET — ${s.remaining} project(s) still to import. Re-run to continue.`);
+    } else if (ph === 'leads') {
+      lines.push(`   updated ${s.updated}   with issues ${s.partial.length}   archived (skipped) ${s.archived}   gone from Barbour ${s.missingOnBarbour.length}   gone from PD ${s.missingLead.length}   failed ${s.failed}`);
+      if (s.lastPid) lines.push(`   last completed Barbour id ${s.lastPid}  (after a restart: BACKFILL_LEADS_START_AFTER=${s.lastPid})`);
     } else if (ph === 'search') {
       lines.push(`   patched ${s.patched}   (of which Tag-Sync inferred ${s.taggedTagSync ?? 0})   unchanged ${s.unchanged}   no-lead-in-PD ${s.noLead}   archived ${s.archived}   failed ${s.failed}`);
     } else {
@@ -139,6 +152,23 @@ function buildEmail(run, note) {
       lines.push(`  • [${a.phase}] Barbour ${a.pid}  "${a.title || ''}"${url}`);
     }
     lines.push(``);
+  }
+
+  // A4 lists — decisions or follow-ups for Wrekin, not sync failures.
+  const ls = run.stats.leads;
+  if (ls) {
+    const list = (title, rows, fmt) => {
+      if (!rows.length) return;
+      lines.push(`${title} (${rows.length}):`);
+      for (const r of rows.slice(0, 50)) lines.push(`  • ${fmt(r)}`);
+      if (rows.length > 50) lines.push(`  … and ${rows.length - 50} more (see DO Runtime Logs)`);
+      lines.push(``);
+    };
+    list('UPDATED WITH ISSUES — the lead was updated but a contact, organisation or note was not', ls.partial,
+      (r) => `Barbour ${r.pid} "${r.title || ''}": ${r.issues.map((i) => `${i.stage}: ${i.message}`).join('; ')}`);
+    list('NO LONGER ON BARBOUR — lead left exactly as it was', ls.missingOnBarbour, (r) => `Barbour ${r.pid}`);
+    list('LEAD DELETED IN PIPEDRIVE SINCE THE RUN STARTED — not re-created', ls.missingLead, (r) => `Barbour ${r.pid} "${r.title || ''}"`);
+    list('MORE THAN ONE LEAD FOR THE SAME PROJECT — only one was updated; merge in Pipedrive', ls.duplicates, (r) => `Barbour ${r.pid}: leads ${r.leadIds.join(', ')}`);
   }
 
   if (note) lines.push(`--- ${note} ---`);
@@ -469,23 +499,267 @@ async function runFilterPhase(run, report) {
   logger.info(`[backfill:filter] DONE — created=${s.created} skippedExisting=${s.skippedExisting} archived=${s.archived} failed=${s.failed}${s.budgetStopped ? ` (budget stopped, ${s.remaining} remaining)` : ''}`);
 }
 
-const PHASES = { filter: runFilterPhase, search: runSearchPhase, refresh: runRefreshPhase };
+// ---------------------------------------------------------------------------
+// Phase 2 / A4 — overnight window + shared lock
+// ---------------------------------------------------------------------------
+//
+// A4 is ~20h of work (every Barbour lead, ~10s each), so it runs across several
+// nights inside BACKFILL_WINDOW (London wall-clock, may cross midnight) and
+// pauses in between. While working it holds the same lock as the daily run and
+// the weekly catch-up; while paused it holds nothing, so 07:00 runs as normal.
 
-export async function runBackfillReprocess() {
+const LONDON = 'Europe/London';
+const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+
+export function parseWindow(str) {
+  const parts = String(str || '').split('-').map((x) => x.trim());
+  const bad = () => new Error(`BACKFILL_WINDOW "${str}" is not "HH:MM-HH:MM" (London time, e.g. 19:00-06:15)`);
+  if (parts.length !== 2) throw bad();
+  const mins = parts.map((p) => {
+    const m = HHMM.exec(p);
+    if (!m) throw bad();
+    return Number(m[1]) * 60 + Number(m[2]);
+  });
+  if (mins[0] === mins[1]) throw bad();
+  const fmt = (n) => `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+  return { start: mins[0], end: mins[1], label: `${fmt(mins[0])}-${fmt(mins[1])}` };
+}
+
+// Start inclusive, end exclusive.
+export function inWindow(minutes, w) {
+  return w.start < w.end ? minutes >= w.start && minutes < w.end : minutes >= w.start || minutes < w.end;
+}
+
+const londonFmt = new Intl.DateTimeFormat('en-GB', { timeZone: LONDON, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+export function londonMinutes(date) {
+  const parts = Object.fromEntries(londonFmt.formatToParts(date).map((p) => [p.type, p.value]));
+  return Number(parts.hour) * 60 + Number(parts.minute);
+}
+
+// True when any minute from `bufferMin` before a cron's fire time up to the fire
+// time itself falls inside the window. Only "M H * * <dow>" crons can be checked;
+// anything else throws, and the caller refuses to start rather than guess.
+export function windowTouchesCron(w, cronExpr, bufferMin = 30) {
+  const m = /^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\S+$/.exec(String(cronExpr || '').trim());
+  if (!m) throw new Error(`cannot check BACKFILL_WINDOW against cron "${cronExpr}" — only "M H * * *" form is supported`);
+  const fire = Number(m[2]) * 60 + Number(m[1]);
+  for (let k = 0; k <= bufferMin; k += 1) {
+    if (inWindow((fire - k + 1440) % 1440, w)) return true;
+  }
+  return false;
+}
+
+const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// gate() — call before each unit of work. No window: returns at once (legacy
+// behaviour). Otherwise waits for the window (polling ≤5 min, so a DST change or
+// timer drift can't shift it), then for the lock, then returns holding it.
+export function createGate({ window, lock, owner = 'backfill', now = () => new Date(), sleep = defaultSleep, pollMs = 5 * 60 * 1000, lockPollMs = 30 * 1000, onPause = async () => {} }) {
+  const inWindowNow = () => !window || inWindow(londonMinutes(now()), window);
+  const holding = () => lock?.holder() === owner;
+  const release = () => { if (holding()) lock.release(owner); };
+  async function gate() {
+    if (!window) return;
+    for (;;) {
+      if (!inWindowNow()) {
+        release();
+        await onPause({ window });
+        while (!inWindowNow()) await sleep(pollMs);
+        continue;
+      }
+      if (holding() || lock.tryAcquire(owner)) return;
+      await sleep(lockPollMs);
+    }
+  }
+  return { gate, inWindowNow, release };
+}
+
+// ---------------------------------------------------------------------------
+// Phase: leads — Phase 2 / A4, every existing Barbour lead through today's rules
+// ---------------------------------------------------------------------------
+
+// Sorted unique Barbour project ids from the lead list, reading our own id field
+// and the legacy one. Sorted so a manual resume (BACKFILL_LEADS_START_AFTER =
+// the last pid in the progress email) is exact. Two different leads on one pid
+// are reported — the update only reaches whichever one dedup finds.
+export function buildLeadWorkList(leads, { keys, startAfter = 0, max = 0 }) {
+  const useKeys = (keys || []).filter(Boolean);
+  const leadsByPid = new Map();
+  for (const l of leads) {
+    if (l.is_archived) continue;
+    const pids = new Set(useKeys.map((k) => Number(l[k])).filter((n) => Number.isFinite(n) && n > 0));
+    for (const pid of pids) {
+      const ids = leadsByPid.get(pid) || [];
+      ids.push(l.id);
+      leadsByPid.set(pid, ids);
+    }
+  }
+  const duplicates = [...leadsByPid].filter(([, ids]) => ids.length > 1).map(([pid, leadIds]) => ({ pid, leadIds })).sort((a, b) => a.pid - b.pid);
+  let pids = [...leadsByPid.keys()].sort((a, b) => a - b);
+  if (startAfter > 0) pids = pids.filter((p) => p > startAfter);
+  if (max > 0) pids = pids.slice(0, max);
+  return { pids, duplicates };
+}
+
+const isNotFound = (err) => err?.response?.status === 404;
+
+export async function runLeadsPhase(run, report, deps) {
+  const phase = 'leads';
+  const leads = await deps.listAllLeads();
+  const { pids, duplicates } = buildLeadWorkList(leads, { keys: deps.keys, startAfter: deps.startAfter, max: deps.max });
+  const prev = deps.loadState(phase);
+  const done = new Set(prev?.doneIds || []);
+  const s = newStats(pids.length, pids.filter((p) => done.has(p)).length, {
+    updated: 0, archived: 0, archivedLeads: [], missingOnBarbour: [], missingLead: [], partial: [], duplicates, lastPid: null, listedLeads: leads.length,
+  });
+  run.stats[phase] = s;
+  run.currentPhase = phase;
+  logger.info(`[backfill:leads] ${leads.length} PD lead(s) → ${pids.length} Barbour project(s) to update${deps.startAfter ? ` (after ${deps.startAfter})` : ''}; ${duplicates.length} project(s) with more than one lead; ${s.skippedPrevRun} already done`);
+
+  for (const pid of pids) {
+    if (done.has(pid)) continue;
+    await deps.gate();
+    let title;
+    try {
+      let project;
+      try {
+        project = await deps.getProjectById(pid);
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      if (!project) {
+        s.missingOnBarbour.push({ pid });
+        logger.warn(`[backfill:leads] ${pid} — no longer on Barbour, lead left as is`);
+      } else {
+        title = project.project_title;
+        const result = await deps.processProject(project, { source: 'refresh', preserveOwner: true, preserveLabels: true, noCreate: true });
+        if (result?.missingLead) {
+          s.missingLead.push({ pid, title });
+          logger.warn(`[backfill:leads] ${pid} — lead no longer in PD (deleted since listing?), nothing written`);
+        } else {
+          s.updated += 1;
+          if (result?.issues?.length) {
+            s.partial.push({ pid, title, issues: result.issues });
+            logger.warn(`[backfill:leads] ${pid} updated with ${result.issues.length} issue(s): ${result.issues.map((i) => `${i.stage}: ${i.message}`).join('; ')}`);
+          }
+        }
+      }
+      s.lastItem = `${pid} ${title || ''}`.slice(0, 110);
+    } catch (err) {
+      if (isArchivedLeadError(err)) {
+        s.archived += 1;
+        s.archivedLeads.push({ pid, title, leadId: err.leadId });
+        logger.warn(`[backfill:leads] ${pid} — PD lead ${err.leadId || '?'} is archived, skipped`);
+      } else {
+        recordFailure(s, pid, title, err);
+        logger.error(`[backfill:leads] ${pid} failed: ${err.message}`);
+      }
+    }
+    s.processed += 1;
+    s.lastPid = pid;
+    done.add(pid);
+    deps.saveState(phase, { doneIds: [...done] });
+    await report();
+  }
+  s.finishedAt = Date.now();
+  logger.info(`[backfill:leads] DONE — updated=${s.updated} partial=${s.partial.length} missingOnBarbour=${s.missingOnBarbour.length} missingLead=${s.missingLead.length} archived=${s.archived} failed=${s.failed}`);
+}
+
+// ---------------------------------------------------------------------------
+// Phase: rollup — Phase 2 / A1 roll-up for every organisation in one pass
+// ---------------------------------------------------------------------------
+//
+// The daily run caps roll-up writes (ROLLUP_MAX_WRITES); here it's uncapped.
+// Each write checks the window; once it closes, the rest of the pass becomes a
+// no-op, and after the pause the roll-up is planned again from fresh reads —
+// orgs already written match their hash and are skipped.
+export async function runRollupPhase(run, report, deps) {
+  const s = { startedAt: Date.now(), passes: 0 };
+  run.stats.rollup = s;
+  run.currentPhase = 'rollup';
+  try {
+    for (;;) {
+      await deps.gate();
+      s.passes += 1;
+      let paused = false;
+      const writeOrgRollup = async (...args) => {
+        if (paused) return;
+        if (!deps.inWindowNow()) {
+          paused = true;
+          logger.info('[backfill:rollup] window closed — stopping writes; will re-plan when it reopens');
+          return;
+        }
+        await deps.rollupDeps.writeOrgRollup(...args);
+      };
+      const res = await deps.runRollupSync({ ...deps.rollupDeps, writeOrgRollup }, { ...deps.opts, maxWrites: Infinity });
+      if (paused) continue;
+      Object.assign(s, res);
+      break;
+    }
+  } catch (err) {
+    s.error = err.message;
+    logger.error(`[backfill:rollup] failed: ${err.message}`);
+  }
+  s.finishedAt = Date.now();
+  await report();
+}
+
+const PHASES = {
+  filter: runFilterPhase,
+  search: runSearchPhase,
+  refresh: runRefreshPhase,
+  leads: (run, report, ctx) => runLeadsPhase(run, report, {
+    keys: [fields.lead.barbourProjectId, fields.lead.legacyBarbourProjectId],
+    listAllLeads,
+    getProjectById,
+    processProject,
+    gate: ctx.gate,
+    startAfter: config.backfill.leadsStartAfter,
+    max: config.maxProjectsPerSync,
+    loadState,
+    saveState,
+  }),
+  rollup: (run, report, ctx) => runRollupPhase(run, report, {
+    runRollupSync,
+    rollupDeps: rollupDefaultDeps,
+    opts: rollupOptsFromConfig(),
+    gate: ctx.gate,
+    inWindowNow: ctx.inWindowNow,
+  }),
+};
+
+// `window` (parsed BACKFILL_WINDOW) + `lock` — Phase 2 / A4. The leads and rollup
+// phases wait for the window and take the shared lock while working. Without a
+// window everything runs straight through, as before.
+export async function runBackfillReprocess({ window = null, lock = null } = {}) {
   const phases = config.backfill.phases.filter((p) => PHASES[p]);
   const unknown = config.backfill.phases.filter((p) => !PHASES[p]);
   if (unknown.length) logger.warn(`[backfill] ignoring unknown phase(s): ${unknown.join(', ')}`);
-  if (!phases.length) throw new Error('BACKFILL_PHASES has no valid phases (search, refresh)');
+  if (!phases.length) throw new Error(`BACKFILL_PHASES has no valid phases (${Object.keys(PHASES).join(', ')})`);
+  if (window) {
+    const ungated = phases.filter((p) => p !== 'leads' && p !== 'rollup');
+    if (ungated.length) logger.warn(`[backfill] BACKFILL_WINDOW only applies to the leads and rollup phases — ${ungated.join(', ')} will run straight through`);
+  }
 
-  const run = { startedAt: Date.now(), phases, currentPhase: null, stats: {} };
+  const run = { startedAt: Date.now(), phases, currentPhase: null, stats: {}, window: window?.label };
   resetClassificationRun();
-  logger.info(`[backfill] starting re-process — phases: ${phases.join(' → ')}; reports every ${config.backfill.reportEveryMinutes}m${config.dryRun ? ' [DRY RUN]' : ''}`);
+  logger.info(`[backfill] starting re-process — phases: ${phases.join(' → ')}; reports every ${config.backfill.reportEveryMinutes}m${window ? `; window ${window.label} London` : ''}${config.dryRun ? ' [DRY RUN]' : ''}`);
   await sendProgress(run, 'START');
   const report = makeReporter(run);
+  const { gate, inWindowNow, release } = createGate({
+    window,
+    lock,
+    owner: 'backfill',
+    onPause: () => sendProgress(run, `paused — resumes at ${window.label.split('-')[0]} London`),
+  });
 
-  for (const ph of phases) {
-    await PHASES[ph](run, report);
-    await sendProgress(run, `${ph} phase complete`);
+  try {
+    for (const ph of phases) {
+      await PHASES[ph](run, report, { gate, inWindowNow });
+      await sendProgress(run, `${ph} phase complete`);
+    }
+  } finally {
+    release();
   }
 
   run.currentPhase = null;

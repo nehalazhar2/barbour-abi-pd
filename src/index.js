@@ -5,7 +5,8 @@ import { sendFailureAlert } from './utils/alerts.js';
 import { runTagSync } from './sync/tagSync.js';
 import { runFilterSync } from './sync/filterSync.js';
 import { runRefreshSync } from './sync/refreshSync.js';
-import { runBackfillReprocess, parkForever } from './sync/backfillReprocess.js';
+import { runBackfillReprocess, parkForever, parseWindow, windowTouchesCron } from './sync/backfillReprocess.js';
+import { runLock } from './utils/runLock.js';
 import { resetSavedSearchCache } from './barbourabi/savedSearches.js';
 import { resetTagCache } from './barbourabi/tags.js';
 import { resetClassificationRun } from './sync/leadClassification.js';
@@ -13,22 +14,20 @@ import { runCatchupSync } from './sync/catchupSync.js';
 import { runRollupSync } from './sync/rollupSync.js';
 import { sendBackfillEmail } from './utils/alerts.js';
 
-// One lock for every pass: the daily run and the weekly catch-up must never
-// overlap (both write the same leads). A skipped run alerts — a silent skip
-// would look exactly like a quiet day.
-let running = false;
+// One lock for every pass: the daily run, the weekly catch-up and the A4
+// overnight re-process must never overlap (all write the same leads). A skipped
+// run alerts — a silent skip would look exactly like a quiet day.
 
 async function alertSkipped(what, trigger) {
-  logger.warn(`[${what}] another run still in progress — skipping (trigger=${trigger})`);
+  logger.warn(`[${what}] another run (${runLock.holder()}) still in progress — skipping (trigger=${trigger})`);
   await sendFailureAlert(new Error(`${what} skipped: another sync run was still in progress`), { trigger, reason: 'lock held' });
 }
 
 async function runAll(trigger = 'cron') {
-  if (running) {
+  if (!runLock.tryAcquire('daily')) {
     await alertSkipped('runAll', trigger);
     return;
   }
-  running = true;
   const start = Date.now();
   logger.info(`[runAll] starting sync run (trigger=${trigger})`);
   // The worker lives for weeks between deploys. Without these, a saved search
@@ -84,17 +83,16 @@ async function runAll(trigger = 'cron') {
     logger.error(`[runAll] run failed: ${err.message}`);
     await sendFailureAlert(err, { trigger });
   } finally {
-    running = false;
+    runLock.release('daily');
   }
 }
 
 // Weekly saved-search catch-up — see src/sync/catchupSync.js.
 async function runCatchup(trigger = 'cron') {
-  if (running) {
+  if (!runLock.tryAcquire('catchup')) {
     await alertSkipped('catchupSync', trigger);
     return;
   }
-  running = true;
   try {
     await runCatchupSync();
   } catch (err) {
@@ -108,7 +106,7 @@ async function runCatchup(trigger = 'cron') {
       text: `The weekly catch-up stopped before importing anything:\n\n${err.message}\n\nIt will try again next week. Check DO Runtime Logs for detail.`,
     });
   } finally {
-    running = false;
+    runLock.release('catchup');
   }
 }
 
@@ -137,6 +135,31 @@ function start() {
   // window). When it completes we schedule the cron in this same process so the
   // next 07:00 run isn't missed. Unset BACKFILL_MODE on DO afterwards so a
   // container restart doesn't start the backfill again from scratch.
+  if (config.backfill.mode === 'reprocess' && config.backfill.window) {
+    // Phase 2 / A4 — multi-night re-process inside BACKFILL_WINDOW. The cron is
+    // scheduled FIRST so the daily run never misses a morning; the backfill
+    // shares its lock and pauses outside the window.
+    scheduleCron();
+    let window;
+    try {
+      window = parseWindow(config.backfill.window);
+      const crons = [config.schedule.cron, ...(config.catchup.enabled ? [config.catchup.cron] : [])];
+      const clash = crons.find((c) => windowTouchesCron(window, c));
+      if (clash) throw new Error(`BACKFILL_WINDOW ${window.label} overlaps (or ends <30 min before) cron "${clash}"`);
+    } catch (err) {
+      // Config error: don't start the backfill, keep the normal cron running.
+      logger.error(`[index] backfill NOT started — ${err.message}`);
+      sendFailureAlert(err, { trigger: 'backfill' });
+      return;
+    }
+    logger.info(`[index] BACKFILL_MODE=reprocess — running inside window ${window.label} London; daily cron already scheduled`);
+    runBackfillReprocess({ window, lock: runLock }).catch(async (err) => {
+      logger.error(`[index] backfill threw: ${err.message}`);
+      await sendFailureAlert(err, { trigger: 'backfill' });
+    });
+    return;
+  }
+
   if (config.backfill.mode === 'reprocess') {
     logger.info('[index] BACKFILL_MODE=reprocess — running one-off re-process first (cron scheduled on completion)');
     runBackfillReprocess()

@@ -295,8 +295,10 @@ export async function ensureLeadLabels(leadId, expectedLabelIds, { attempts = 4,
   return wrote;
 }
 
-export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null } = {}) {
-  const { lead: existing, viaLegacy } = await findLeadByBarbourId(project.project_id);
+// `found` — a { lead, viaLegacy } the caller already looked up (A4 passes it so
+// each project costs one search, not two).
+export async function upsertLead(project, primaryOrgId, primaryPersonId, ironworkValue, geoworksValue, ownerId, source, extraCustomFields, { preserveOwner = false, preserveLabels = false, matchedSearches = [], createAs = null, found = null } = {}) {
+  const { lead: existing, viaLegacy } = found || await findLeadByBarbourId(project.project_id);
   if (existing?.id) {
     if (existing.is_archived === true) {
       logger.warn(
