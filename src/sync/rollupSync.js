@@ -56,8 +56,9 @@ export function buildRollups({ leads, deals, orgs, keys, includeDeals, shellComp
   }
   const knownOrgIds = new Set(orgs.map((o) => o.id));
 
-  // One item per Barbour project, merged from every record for it (refresh
-  // can recreate a lead after conversion — 15 live cases on 26 Oct):
+  // One item per Barbour project, merged from every record for it (lead dedup
+  // never looked at deals, so 15 projects that already had a Deal got a new
+  // Lead too — live on 27 Oct; fixed on the production hotfix branch):
   //   shown as: the Deal if there is one, else the lowest-id Lead
   //   value:    the shown record's value, else the largest other non-zero one
   //             (converted deals carry no project value — 0/31 live)
