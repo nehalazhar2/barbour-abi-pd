@@ -170,8 +170,8 @@ if (cmd === 'list') {
       },
       { label: 'pd-createField' },
     );
-    const f = res.data?.data;
-    console.log(`Created: id=${f.id} key=${f.key} name="${f.name}" options=${(f.options || []).length}  →  ${p.env}=${f.key}`);
+    const created = res.data?.data;
+    console.log(`Created: id=${created.id} key=${created.key} name="${created.name}" options=${(created.options || []).length}  →  ${p.env}=${created.key}`);
   }
   console.log('\nSet both env vars at BOTH DO levels (app + component) once the null-clear check has passed.');
 } else {
