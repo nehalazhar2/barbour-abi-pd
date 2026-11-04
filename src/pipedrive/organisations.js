@@ -364,7 +364,7 @@ export async function writeOrgRollup(orgId, { fields: f, note, deleteNoteIds = [
   }
   if (note?.action === 'create') {
     await requestV1(
-      { method: 'POST', url: '/notes', data: { org_id: orgId, content, pinned_to_organization_flag: 1 } },
+      { method: 'POST', url: '/notes', data: { org_id: orgId, content, pinned_to_organization_flag: 0 } },
       { label: 'pd-orgRollupNoteCreate' },
     );
   } else if (note?.action === 'update') {

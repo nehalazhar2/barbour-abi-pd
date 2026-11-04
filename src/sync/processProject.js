@@ -8,6 +8,7 @@ import { makePersonUpserter, contactLabelIds, walkLabelKind } from '../pipedrive
 import { upsertLead, findLeadByBarbourId, findDealByBarbourId, ArchivedLeadError, clearIntegrationNotes, addNoteToLead, ensureLeadLabels, labelIdsForSource } from '../pipedrive/leads.js';
 import { fields } from '../pipedrive/customFields.js';
 import { buildClassificationFields } from './leadClassification.js';
+import { makeTitleMatcher } from './titleRules.js';
 
 // Pack associated orgs into the ordered leadOrgSlots array. Primary org goes into
 // slot 1; the remaining orgs (deduped by company_id) fill slots 2..N in
@@ -228,15 +229,16 @@ export async function processProject(project, { ownerId, source, preserveOwner =
   );
   const approvedTitles = config.pipedrive.approvedContactJobTitles || [];
   const readJobTitle = (p) => p?.job_title || p?.person_job_title || p?.person_title || '';
-  const jobTitleAllowed = (title) => {
-    if (approvedTitles.length === 0) return true;
-    const lower = (title || '').toLowerCase();
-    return approvedTitles.some((k) => lower.includes(k));
-  };
+  // Phase 2 / A3 — the global list, plus looser titles where the company's role
+  // makes them relevant. A company can play several roles on one project, so
+  // the walk passes every role it plays (src/sync/titleRules.js).
+  const jobTitleAllowed = makeTitleMatcher({ approvedTitles, roleRules: config.pipedrive.roleJobTitles || [] });
+  const rolesByCompanyId = new Map();
+  for (const r of roles) rolesByCompanyId.set(r.company_id, [...(rolesByCompanyId.get(r.company_id) || []), r.role_name]);
   if (approvedTitles.length > 0) {
     for (const r of roles) {
       const before = (r.persons || []).length;
-      r.persons = (r.persons || []).filter((p) => jobTitleAllowed(readJobTitle(p)));
+      r.persons = (r.persons || []).filter((p) => jobTitleAllowed(readJobTitle(p), rolesByCompanyId.get(r.company_id)));
       const dropped = before - r.persons.length;
       if (dropped > 0) {
         logger.debug(
@@ -348,7 +350,7 @@ export async function processProject(project, { ownerId, source, preserveOwner =
       const pdOrgId = orgByBarbourCompanyId[role.company_id];
       if (!pdOrgId) continue;
       const raw = await getCompanyPeople(role.company_id, { limit: 200 });
-      const filtered = raw.filter((p) => jobTitleAllowed(readJobTitle(p)));
+      const filtered = raw.filter((p) => jobTitleAllowed(readJobTitle(p), rolesByCompanyId.get(role.company_id)));
       const slice = filtered.slice(0, maxPerOrg);
       if (slice.length === 0) {
         logger.debug(

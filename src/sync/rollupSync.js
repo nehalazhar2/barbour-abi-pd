@@ -12,7 +12,8 @@ import { listBarbourOrgs, listRollupNotes, getApiUserId, writeOrgRollup } from '
 // record. This pass gives each Barbour organisation:
 //   - Total Barbour Project Value  (sum of the linked projects' Barbour value)
 //   - Associated Barbour Leads     (how many projects)
-//   - a pinned Note listing them, each a link to the Lead/Deal
+//   - one Note listing them, each a link to the Lead/Deal — NOT pinned (Liam,
+//     4 Nov: pinned notes crowd the org); updated in place, never duplicated
 // Scope + decisions: docs/Barbour Phase 2 deliverables.md (A1) and
 // docs/builds/2026-10-26-phase2-A1.md.
 

@@ -123,9 +123,19 @@ if (cmd === 'list') {
   for (const p of plan) console.log(`${p.name} (set, group ${BARBOUR_GROUP_ID}): ${p.labels.map((l) => `"${l}"`).join(', ')}`);
   // Existing fields are skipped, not recreated — so a half-finished run can be
   // re-run safely. Their keys are printed for the env.
+  // An existing field missing some of our labels (e.g. created before the stop
+  // statuses were added, 4 Nov) gets them appended — existing options are sent
+  // back with their ids, so none are removed or renumbered.
+  const missingLabels = (p, f) => {
+    const have = new Set((f.options || []).map((o) => String(o.label).trim().toLowerCase()));
+    return p.labels.filter((l) => !have.has(l.toLowerCase()));
+  };
   for (const p of plan) {
     const f = findExisting(p);
-    if (f) console.log(`Already exists, will skip: id=${f.id} type=${f.field_type} options=${(f.options || []).length}  →  ${p.env}=${f.key}`);
+    if (!f) continue;
+    const add = missingLabels(p, f);
+    console.log(`Already exists: id=${f.id} type=${f.field_type} options=${(f.options || []).length}  →  ${p.env}=${f.key}` +
+      (add.length ? `  — will ADD options: ${add.map((l) => `"${l}"`).join(', ')}` : '  — options complete, will skip'));
   }
   if (!apply) {
     console.log('\nPlan only. Re-run with --apply (and DRY_RUN unset) to create.');
@@ -137,7 +147,21 @@ if (cmd === 'list') {
     process.exit(1);
   }
   for (const p of plan) {
-    if (findExisting(p)) continue;
+    const f = findExisting(p);
+    if (f) {
+      const add = missingLabels(p, f);
+      if (!add.length) continue;
+      const res = await requestV1(
+        {
+          method: 'PUT',
+          url: `/dealFields/${f.id}`,
+          data: { options: [...(f.options || []).map((o) => ({ id: o.id, label: o.label })), ...add.map((label) => ({ label }))] },
+        },
+        { label: 'pd-addFieldOptions' },
+      );
+      console.log(`Updated: id=${f.id} "${f.name}" options ${(f.options || []).length} → ${(res.data?.data?.options || []).length}`);
+      continue;
+    }
     const res = await requestV1(
       {
         method: 'POST',

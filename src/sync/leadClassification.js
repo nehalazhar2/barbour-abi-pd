@@ -22,8 +22,13 @@ export const PROJECT_STAGE_LABELS = [
   'Contract Stages - Pre-tender',
   'Contract Stages - Main contract tender',
   'Contract Stages - Main contract awarded',
+  // Stop statuses (Liam, 4 Nov) — shown INSTEAD of the last stage, which is stale.
+  'On Hold',
+  'Withdrawn',
+  'Abandoned',
 ];
-const [SUBMITTED, APPROVED, PRETENDER, TENDER, AWARDED] = PROJECT_STAGE_LABELS;
+const [SUBMITTED, APPROVED, PRETENDER, TENDER, AWARDED, ON_HOLD, WITHDRAWN, ABANDONED] = PROJECT_STAGE_LABELS;
+const STOP_LABELS = new Set([ON_HOLD, WITHDRAWN, ABANDONED]);
 
 // Barbour lookup ids (GET /lookups, 26 Oct 2026). planning_stage: 2 Outline
 // planning, 3 Detail planning, 10 Outline approval, 11 Detail approval.
@@ -31,11 +36,14 @@ const [SUBMITTED, APPROVED, PRETENDER, TENDER, AWARDED] = PROJECT_STAGE_LABELS;
 // lookup numbers Pre-tender 4, so both map.
 const PLANNING = new Map([[2, SUBMITTED], [3, SUBMITTED], [10, APPROVED], [11, APPROVED]]);
 const CONTRACT = new Map([[4, PRETENDER], [5, PRETENDER], [6, TENDER], [7, AWARDED]]);
-// project_stopped (lookup `stopped`): 19 Abandoned, 30 On hold → blank.
-const STOPPED = new Set([19, 30]);
+// project_stopped (lookup `stopped`): 19 Abandoned, 30 On hold. A separate
+// field — a stopped project still carries its last planning/contract stage.
+const STOPPED = new Map([[19, ABANDONED], [30, ON_HOLD]]);
+// planning_stage 20 = Withdrawn. Also a stop status, so it replaces the stage.
+const PLANNING_WITHDRAWN = 20;
 // Codes Barbour defines that deliberately map to nothing (Tentative, Confirmed,
-// refusals, Withdrawn) — not worth a warning.
-const KNOWN_UNMAPPED_PLANNING = new Set([0, 1, 15, 16, 20]);
+// refusals) — not worth a warning.
+const KNOWN_UNMAPPED_PLANNING = new Set([0, 1, 15, 16]);
 
 // HARD-CODED on purpose. BARBOURABI_MATERIALS_SHORTLIST is a DIFFERENT list of
 // 14 (it has RD0116 + SW0153, lacks SW0133 + SW0155) — never derive from it.
@@ -86,8 +94,15 @@ function stageId(v) {
 
 export function projectStageLabels(project) {
   if (!isStamped(project)) return undefined;
-  if (STOPPED.has(stageId(project.project_stopped))) return [];
+  // A stop status replaces the stage entirely: "Contract awarded" on an
+  // abandoned project would mislead. Stopped (its own field) wins over Withdrawn.
+  const stopped = stageId(project.project_stopped);
+  if (STOPPED.has(stopped)) return [STOPPED.get(stopped)];
+  if (stopped !== undefined && stopped !== 0) {
+    warnOnce(`st:${stopped}`, `[classification] unmapped Barbour stopped status ${stopped} (project ${project.project_id}) — ignored`);
+  }
   const ps = stageId(project.project_planning_stage);
+  if (ps === PLANNING_WITHDRAWN) return [WITHDRAWN];
   const cs = stageId(project.project_contract_stage);
   // Every project sampled (500/500) has at least one stage. Both missing far
   // more likely means the fields didn't come back than that the project has no
@@ -156,6 +171,14 @@ export async function buildClassificationFields(project, {
     if (labels.length === 0) { out[key] = null; continue; }
     const ids = labels.map((l) => options.get(normaliseOptionLabel(l)));
     const missing = labels.filter((_, i) => ids[i] == null);
+    if (missing.length && labels.every((l) => STOP_LABELS.has(l))) {
+      // A field created before the stop statuses existed: blank it (the old
+      // behaviour) rather than leave a stale "Contract awarded" on an abandoned
+      // project. create-a7 --apply adds the missing options.
+      warnOnce(`label:${key}:${missing.join('|')}`, `[classification] ${name} has no PD option for ${missing.map((m) => `"${m}"`).join(', ')} — field cleared instead (run scripts/pd-fields-admin.js create-a7 --apply to add it)`);
+      out[key] = null;
+      continue;
+    }
     if (missing.length) {
       // A set write replaces the whole value, so writing the subset would DROP
       // the renamed option from every lead. Leave the field as it is instead.

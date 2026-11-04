@@ -12,19 +12,22 @@ import {
 // project fetched without fields=) must never cause a write.
 const stamped = (o) => Object.defineProperty({ ...o }, '__classificationFields', { value: true, enumerable: false });
 
-const [SUBMITTED, APPROVED, PRETENDER, TENDER, AWARDED] = PROJECT_STAGE_LABELS;
+const [SUBMITTED, APPROVED, PRETENDER, TENDER, AWARDED, ON_HOLD, WITHDRAWN, ABANDONED] = PROJECT_STAGE_LABELS;
 
 // ---------------------------------------------------------------------------
 // Project Stage
 // ---------------------------------------------------------------------------
 
-test('stage: the five labels are exactly the approved wording, in order', () => {
+test('stage: the labels are exactly the approved wording, in order', () => {
   assert.deepEqual(PROJECT_STAGE_LABELS, [
     'Planning Stages - Plans submitted',
     'Planning Stages - Plans approved',
     'Contract Stages - Pre-tender',
     'Contract Stages - Main contract tender',
     'Contract Stages - Main contract awarded',
+    'On Hold',
+    'Withdrawn',
+    'Abandoned',
   ]);
 });
 
@@ -46,8 +49,8 @@ test('stage: planning and contract together show both, planning first', () => {
   assert.deepEqual(projectStageLabels(stamped({ project_contract_stage: 7, project_planning_stage: 3 })), [SUBMITTED, AWARDED]);
 });
 
-test('stage: codes outside the five give a known blank []', () => {
-  for (const ps of [0, 1, 15, 16, 20]) {
+test('stage: codes outside the mapping give a known blank []', () => {
+  for (const ps of [0, 1, 15, 16]) {
     assert.deepEqual(projectStageLabels(stamped({ project_planning_stage: ps })), [], `ps=${ps}`);
   }
 });
@@ -56,9 +59,28 @@ test('stage: string ids are accepted', () => {
   assert.deepEqual(projectStageLabels(stamped({ project_planning_stage: '11', project_contract_stage: '6' })), [APPROVED, TENDER]);
 });
 
-test('stage: on hold or abandoned blanks the field even at a mapped stage', () => {
-  assert.deepEqual(projectStageLabels(stamped({ project_planning_stage: 11, project_contract_stage: 7, project_stopped: 30 })), []);
-  assert.deepEqual(projectStageLabels(stamped({ project_contract_stage: 7, project_stopped: '19' })), []);
+test('stage: on hold / abandoned replace the stage, even a mapped one', () => {
+  assert.deepEqual(projectStageLabels(stamped({ project_planning_stage: 11, project_contract_stage: 7, project_stopped: 30 })), [ON_HOLD]);
+  assert.deepEqual(projectStageLabels(stamped({ project_contract_stage: 7, project_stopped: '19' })), [ABANDONED]);
+});
+
+test('stage: stopped is known even when both stage keys are absent', () => {
+  assert.deepEqual(projectStageLabels(stamped({ project_stopped: 30 })), [ON_HOLD]);
+});
+
+test('stage: withdrawn planning replaces any contract stage', () => {
+  assert.deepEqual(projectStageLabels(stamped({ project_planning_stage: 20 })), [WITHDRAWN]);
+  assert.deepEqual(projectStageLabels(stamped({ project_planning_stage: '20', project_contract_stage: 6 })), [WITHDRAWN]);
+});
+
+test('stage: stopped wins over withdrawn', () => {
+  assert.deepEqual(projectStageLabels(stamped({ project_planning_stage: 20, project_stopped: 19 })), [ABANDONED]);
+});
+
+test('stage: blank / zero / unknown stopped values fall through to the stage', () => {
+  for (const st of [0, '0', ' ', '', null, 99]) {
+    assert.deepEqual(projectStageLabels(stamped({ project_contract_stage: 7, project_stopped: st })), [AWARDED], `stopped=${JSON.stringify(st)}`);
+  }
 });
 
 test('stage: unstamped project is "unknown" (undefined), never a blank', () => {
@@ -254,4 +276,14 @@ test('stamp: real project rows are stamped (non-enumerable); envelopes are not',
   assert.equal(JSON.stringify(row), '{"project_id":1}');
   assert.equal(projectsTest.stamp({ error: 'x' }).__classificationFields, undefined);
   assert.equal(projectsTest.stamp(null), null);
+});
+
+test('build: a stop status missing from an older PD field clears it, never leaves a stale stage', async () => {
+  const fiveOnly = new Map(PROJECT_STAGE_LABELS.slice(0, 5).map((l, i) => [norm(l), 100 + i]));
+  const optionsFor = async (key) => (key === 'stageKey' ? fiveOnly : null);
+  const out = await buildClassificationFields(stamped({ project_contract_stage: 7, project_stopped: 30 }), { optionsFor, fieldKeys: { stage: 'stageKey' }, otherKeys: [] });
+  assert.deepEqual(out, { stageKey: null });
+  // A normal (non-stop) label still resolves against the old five.
+  const ok = await buildClassificationFields(stamped({ project_contract_stage: 7 }), { optionsFor, fieldKeys: { stage: 'stageKey' }, otherKeys: [] });
+  assert.deepEqual(ok, { stageKey: '104' });
 });

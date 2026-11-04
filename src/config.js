@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { parseRoleJobTitles } from './sync/titleRules.js';
 
 const parseRoles = (raw) => {
   if (!raw) return null;
@@ -248,6 +249,10 @@ export const config = {
         .split(',')
         .map((s) => s.trim().toLowerCase())
         .filter(Boolean),
+    // Phase 2 / A3 — extra title keywords accepted per company role, on top of
+    // the list above. Unset/blank → Wrekin's agreed rules; "off" disables.
+    // Format and default: src/sync/titleRules.js.
+    roleJobTitles: parseRoleJobTitles(process.env.ROLE_JOB_TITLES),
   },
   products: {
     ironwork: parseFloat(process.env.PRODUCT_PCT_IRONWORK || '0.004'),
