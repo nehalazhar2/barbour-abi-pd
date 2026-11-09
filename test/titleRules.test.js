@@ -10,7 +10,7 @@ const allowed = makeTitleMatcher({ approvedTitles: GLOBAL, roleRules: parseRoleJ
 
 test('parse: unset and blank both give the agreed default', () => {
   const want = [
-    { role: 'civil engineer', keywords: ['engineer', 'sustainability'] },
+    { role: 'civil engineer', keywords: ['engineer', 'sustainab'] },
     { role: 'quantity surveyor', keywords: ['project surveyor'] },
     { role: 'contractor', keywords: ['estimat'] },
   ];
@@ -36,7 +36,7 @@ test('role scope against the real Barbour role names', () => {
 });
 
 test('civil engineer firm: any engineer or sustainability title', () => {
-  for (const t of ['Engineer', 'Senior Engineer', 'Graduate engineer', 'Head of Sustainability', 'Sustainability Manager']) {
+  for (const t of ['Engineer', 'Senior Engineer', 'Graduate engineer', 'Head of Sustainability', 'Sustainability Manager', 'Sustainable Drainage Lead', 'Assistant Engineer']) {
     assert.equal(allowed(t, ['Civil engineer']), true, t);
   }
 });

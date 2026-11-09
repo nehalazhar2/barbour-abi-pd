@@ -4,14 +4,14 @@
 // every company. On top of it, a looser title is accepted when the company's
 // role on the project already makes it relevant — "Engineer" at a Civil
 // engineer firm. Wrekin's rules (Ben, via Liam, 4 Nov):
-//   Civil engineers   + anything with "engineer" or "sustainability"
+//   Civil engineers   + anything with "engineer" or "sustainab" (Sustainability, Sustainable — Liam, 9 Nov)
 //   Quantity surveyor + "Senior project surveyor", "Project surveyor"
 //   Contractors (all) + "estimating" — stem "estimat" also catches estimator
 //
 // Format: `role=kw|kw;role=kw`. Both sides are case-insensitive substrings: the
 // role key matches any Barbour role_name containing it, so "contractor" covers
 // Contractor, Groundworks contractor and Drainage subcontractor.
-export const DEFAULT_ROLE_JOB_TITLES = 'civil engineer=engineer|sustainability;quantity surveyor=project surveyor;contractor=estimat';
+export const DEFAULT_ROLE_JOB_TITLES = 'civil engineer=engineer|sustainab;quantity surveyor=project surveyor;contractor=estimat';
 
 // Runs while config.js is still initialising, so it can't use logger (which
 // imports config) — plain console.warn.
