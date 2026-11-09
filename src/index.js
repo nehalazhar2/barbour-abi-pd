@@ -72,6 +72,11 @@ async function runAll(trigger = 'cron') {
     if (filterStats?.error) failed.push({ sync: 'filter', error: filterStats.error });
     if (refreshStats?.error) failed.push({ sync: 'refresh', error: refreshStats.error });
     if (rollupStats?.error) failed.push({ sync: 'rollup', error: rollupStats.error });
+    // Per-org write failures are caught inside the roll-up and only counted —
+    // without this a systematic 400 (e.g. a field shape change) would be silent.
+    else if (rollupStats?.failed > 0) {
+      failed.push({ sync: 'rollup', error: new Error(`${rollupStats.failed} org roll-up write(s) failed (${rollupStats.written ?? 0} written) — see logs`) });
+    }
     if (failed.length > 0) {
       const summary = failed.map((f) => `${f.sync}=${f.error.message}`).join('; ');
       const alertErr = new Error(
