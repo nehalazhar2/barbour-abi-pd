@@ -8,11 +8,16 @@
 //                                   "Product Category Type" multi-select (set) fields with
 //                                   the exact agreed labels. Prints the plan unless --apply.
 //                                   Refuses under DRY_RUN or if either name already exists.
+//   create-role-type [--apply]    → Phase 2 / A3: create the "Contact Role Type" single-option
+//                                   field on Person with the agreed groups (adds any missing
+//                                   options to an existing field). Plan only unless --apply.
 //
 // All writes go through PD's v1 API.
 import { requestV1 } from '../src/pipedrive/client.js';
 import { config } from '../src/config.js';
 import { PROJECT_STAGE_LABELS, PRODUCT_CATEGORY_LABELS } from '../src/sync/leadClassification.js';
+import { CONTACT_ROLE_TYPE_LABELS } from '../src/sync/contactRoleType.js';
+import { normaliseOptionLabel } from '../src/pipedrive/leadFieldOptions.js';
 
 const BARBOUR_GROUP_ID = 23;
 
@@ -174,7 +179,46 @@ if (cmd === 'list') {
     console.log(`Created: id=${created.id} key=${created.key} name="${created.name}" options=${(created.options || []).length}  →  ${p.env}=${created.key}`);
   }
   console.log('\nSet both env vars at BOTH DO levels (app + component) once the null-clear check has passed.');
+} else if (cmd === 'create-role-type') {
+  // Labels from the same constant the sync writes with, compared with the
+  // sync's own normaliser, so the script and the sync can't disagree.
+  const NAME = 'Contact Role Type';
+  const apply = args.includes('--apply');
+  const res0 = await requestV1({ method: 'GET', url: '/personFields', params: { limit: 500 } }, { label: 'pd-personFields' });
+  const existing = (res0.data?.data || []).filter((f) => normaliseOptionLabel(f.name) === normaliseOptionLabel(NAME));
+  if (existing.length > 1) {
+    console.error(`Refusing: ${existing.length} person fields are named "${NAME}" (ids ${existing.map((f) => f.id).join(', ')}) — tidy up first.`);
+    process.exit(1);
+  }
+  const f = existing[0];
+  if (f && f.field_type !== 'enum') {
+    console.error(`Refusing: "${NAME}" exists (id ${f.id}) but is type ${f.field_type}, not a single-option field.`);
+    process.exit(1);
+  }
+  const have = new Set((f?.options || []).map((o) => normaliseOptionLabel(o.label)));
+  const add = CONTACT_ROLE_TYPE_LABELS.filter((l) => !have.has(normaliseOptionLabel(l)));
+  console.log(`${NAME} (enum, person): ${CONTACT_ROLE_TYPE_LABELS.map((l) => `"${l}"`).join(', ')}`);
+  if (f) console.log(`Already exists: id=${f.id} options=${(f.options || []).length}  →  PD_FIELD_PERSON_CONTACT_ROLE_TYPE=${f.key}` +
+    (add.length ? `  — will ADD: ${add.map((l) => `"${l}"`).join(', ')}` : '  — options complete'));
+  if (!apply) { console.log('\nPlan only. Re-run with --apply (and DRY_RUN unset) to write.'); process.exit(0); }
+  if (config.dryRun) { console.error('Refusing: DRY_RUN=true.'); process.exit(1); }
+  if (f) {
+    if (add.length) {
+      const res = await requestV1(
+        { method: 'PUT', url: `/personFields/${f.id}`, data: { options: [...(f.options || []).map((o) => ({ id: o.id, label: o.label })), ...add.map((label) => ({ label }))] } },
+        { label: 'pd-addPersonFieldOptions' },
+      );
+      console.log(`Updated: id=${f.id} options ${(f.options || []).length} → ${(res.data?.data?.options || []).length}`);
+    }
+  } else {
+    const res = await requestV1(
+      { method: 'POST', url: '/personFields', data: { name: NAME, field_type: 'enum', options: CONTACT_ROLE_TYPE_LABELS.map((label) => ({ label })), add_visible_flag: true } },
+      { label: 'pd-createPersonField' },
+    );
+    const c = res.data?.data;
+    console.log(`Created: id=${c.id} key=${c.key} options=${(c.options || []).length}  →  PD_FIELD_PERSON_CONTACT_ROLE_TYPE=${c.key}`);
+  }
 } else {
-  console.error('Usage: node scripts/pd-fields-admin.js list|rename|create|order|create-a7 ...');
+  console.error('Usage: node scripts/pd-fields-admin.js list|rename|create|order|create-a7|create-role-type ...');
   process.exit(1);
 }

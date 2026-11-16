@@ -12,7 +12,7 @@ test('parse: unset and blank both give the agreed default', () => {
   const want = [
     { role: 'civil engineer', keywords: ['engineer', 'sustainab'] },
     { role: 'quantity surveyor', keywords: ['project surveyor'] },
-    { role: 'contractor', keywords: ['estimat'] },
+    { role: 'contractor', keywords: ['estimat', 'design', 'pre-construction', 'preconstruction', 'pre construction'] },
   ];
   for (const raw of [undefined, null, '', '   ']) assert.deepEqual(parseRoleJobTitles(raw), want, JSON.stringify(raw));
   assert.deepEqual(parseRoleJobTitles(DEFAULT_ROLE_JOB_TITLES), want);
@@ -85,4 +85,20 @@ test('rules off: only the global list', () => {
   const strict = makeTitleMatcher({ approvedTitles: GLOBAL, roleRules: parseRoleJobTitles('off') });
   assert.equal(strict('Engineer', ['Civil engineer']), false);
   assert.equal(strict('Civil Engineer', ['Civil engineer']), true);
+});
+
+test('contractors of every type: design and pre-construction roles (Ben, 14 Nov)', () => {
+  for (const role of ['Contractor', 'Civils contractor', 'Groundworks contractor', 'Drainage subcontractor']) {
+    for (const t of ['Design Manager', 'Design Coordinator', 'Pre-construction Director', 'Preconstruction Manager',
+      'Pre Construction Coordinator', 'Pre–Construction Manager']) {
+      assert.equal(allowed(t, [role]), true, `${t} @ ${role}`);
+    }
+  }
+});
+
+test('design / pre-construction are NOT accepted outside contractors', () => {
+  for (const role of ['Architect', 'Client', 'Civil engineer', 'Quantity surveyor']) {
+    assert.equal(allowed('Design Manager', [role]), false, role);
+    assert.equal(allowed('Pre-construction Manager', [role]), false, role);
+  }
 });

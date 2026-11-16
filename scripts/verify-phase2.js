@@ -20,7 +20,7 @@ const { getProjectById } = await import('../src/barbourabi/projects.js');
 const { getRolesForProject } = await import('../src/barbourabi/roles.js');
 const { buildClassificationFields } = await import('../src/sync/leadClassification.js');
 const { buildRollups } = await import('../src/sync/rollupSync.js');
-const { contactShare, labelAudit, rollupAudit, classificationDiff } = await import('../src/sync/phase2Verify.js');
+const { contactShare, labelAudit, rollupAudit, classificationDiff, roleTypeAudit } = await import('../src/sync/phase2Verify.js');
 
 const [cmd = 'check', ...rest] = process.argv.slice(2);
 const sampleArg = rest.indexOf('--sample');
@@ -72,6 +72,15 @@ if (cmd === 'baseline') {
 
 line(`    ${verdict(la.both.length === 0)}  no contact carries both labels${la.both.length ? ` — e.g. ${la.both.slice(0, 10).join(', ')}` : ''}`);
 line(`    ${verdict(la.legacyLeft.length === 0)}  no PoOP labels remain${la.legacyLeft.length ? ` — ${la.legacyLeft.length}, e.g. ${la.legacyLeft.slice(0, 10).join(', ')}` : ''}`);
+
+// A3 — Contact Role Type on every imported contact.
+if (fields.person.contactRoleType) {
+  const rt = roleTypeAudit(persons, { barbourIdKey: fields.person.barbourPersonId, roleTypeKey: fields.person.contactRoleType });
+  line(`A3  Contact Role Type: ${rt.withType}/${rt.barbourPersons} Barbour contacts`);
+  line(`    ${verdict(rt.missing.length === 0)}  every imported contact has a Contact Role Type${rt.missing.length ? ` — ${rt.missing.length} missing, e.g. ${rt.missing.slice(0, 10).join(', ')}` : ''}`);
+} else {
+  line('A3  Contact Role Type skipped — PD_FIELD_PERSON_CONTACT_ROLE_TYPE not set');
+}
 
 // A1 — all orgs.
 if (fields.org.rollupValue && fields.org.rollupCount) {

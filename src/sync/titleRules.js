@@ -1,3 +1,5 @@
+import { normaliseTitle } from './contactRoleType.js';
+
 // Phase 2 / A3 — role-aware job-title rules.
 //
 // The global approved-title list (PEOPLE_ON_OTHER_PROJECTS_JOB_TITLES) applies to
@@ -7,11 +9,12 @@
 //   Civil engineers   + anything with "engineer" or "sustainab" (Sustainability, Sustainable — Liam, 9 Nov)
 //   Quantity surveyor + "Senior project surveyor", "Project surveyor"
 //   Contractors (all) + "estimating" — stem "estimat" also catches estimator
+//                     + design and pre-construction roles (Ben, 14 Nov)
 //
 // Format: `role=kw|kw;role=kw`. Both sides are case-insensitive substrings: the
 // role key matches any Barbour role_name containing it, so "contractor" covers
 // Contractor, Groundworks contractor and Drainage subcontractor.
-export const DEFAULT_ROLE_JOB_TITLES = 'civil engineer=engineer|sustainab;quantity surveyor=project surveyor;contractor=estimat';
+export const DEFAULT_ROLE_JOB_TITLES = 'civil engineer=engineer|sustainab;quantity surveyor=project surveyor;contractor=estimat|design|pre-construction|preconstruction|pre construction';
 
 // Runs while config.js is still initialising, so it can't use logger (which
 // imports config) — plain console.warn.
@@ -45,7 +48,8 @@ export function parseRoleJobTitles(raw) {
 export function makeTitleMatcher({ approvedTitles = [], roleRules = [] }) {
   return (title, roleNames = []) => {
     if (approvedTitles.length === 0) return true;
-    const lower = (title || '').toLowerCase();
+    // Dashes normalised so "Pre–Construction" (en dash) matches "pre-construction".
+    const lower = normaliseTitle(title);
     if (approvedTitles.some((k) => lower.includes(k))) return true;
     const roles = roleNames.map((r) => String(r || '').toLowerCase());
     return roleRules.some((rule) => roles.some((r) => r.includes(rule.role)) && rule.keywords.some((k) => lower.includes(k)));

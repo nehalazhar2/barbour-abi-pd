@@ -15,6 +15,22 @@ export function contactShare(leads, pidKey) {
   return { barbourLeads: barbour.length, withPerson, pct: barbour.length ? +(100 * withPerson / barbour.length).toFixed(1) : 0 };
 }
 
+// A3 — every imported contact (has a Barbour Person ID) carries a Contact Role
+// Type. Reads v2 (custom_fields) or v1 (flat) person shapes.
+export function roleTypeAudit(persons, { barbourIdKey, roleTypeKey }) {
+  const cf = (p, k) => (p.custom_fields && k in p.custom_fields ? p.custom_fields[k] : p[k]);
+  const out = { barbourPersons: 0, withType: 0, missing: [] };
+  for (const p of persons) {
+    const bid = cf(p, barbourIdKey);
+    if (bid == null || bid === '') continue;
+    out.barbourPersons += 1;
+    const v = cf(p, roleTypeKey);
+    if (v == null || v === '') out.missing.push(p.id);
+    else out.withType += 1;
+  }
+  return out;
+}
+
 // A2 — label states across persons. `legacy` only counts as "left over" when it
 // is a different id from `company` (a renamed 1066 IS the Company label).
 export function labelAudit(persons, { primary, company, legacy }) {

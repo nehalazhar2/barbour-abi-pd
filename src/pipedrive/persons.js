@@ -1,6 +1,7 @@
 import { requestV2 } from './client.js';
 import { wrapForV2, fields, searchByCustomField } from './customFields.js';
 import { logger } from '../utils/logger.js';
+import { contactRoleTypeOptionId } from './personFieldOptions.js';
 
 // Name + org fallback lookup. Barbour often ships persons with only a name and
 // no email. Searching PD by name alone is too ambiguous (many people share names),
@@ -95,7 +96,7 @@ export async function findPersonByBarbourId(barbourPersonId) {
   return searchByCustomField('person', key, barbourPersonId);
 }
 
-function buildPersonBody(person, orgId, { labelIds } = {}) {
+export function buildPersonBody(person, orgId, { labelIds, roleTypeId } = {}) {
   const customFieldValues = {
     // Stringify — Barbour IDs are numeric but the varchar custom field demands string.
     [fields.person.barbourPersonId]: person.person_id != null ? String(person.person_id) : undefined,
@@ -106,6 +107,11 @@ function buildPersonBody(person, orgId, { labelIds } = {}) {
   if (fields.person.barbourJobTitle && person.job_title) {
     customFieldValues[fields.person.barbourJobTitle] = person.job_title;
   }
+  // Phase 2 / A3 Contact Role Type — option id resolved by the caller;
+  // undefined (field off / option missing) leaves the field out entirely.
+  if (fields.person.contactRoleType && roleTypeId != null) {
+    customFieldValues[fields.person.contactRoleType] = roleTypeId;
+  }
   const body = { name: fullName(person) };
   if (person.email) body.emails = [{ value: person.email, primary: true, label: 'work' }];
   if (person.phone) body.phones = [{ value: person.phone, primary: true, label: 'work' }];
@@ -115,9 +121,16 @@ function buildPersonBody(person, orgId, { labelIds } = {}) {
   return { ...body, ...wrapForV2(customFieldValues) };
 }
 
+// Every person write goes through createPerson / updatePerson, so this is the
+// one place the Contact Role Type is worked out.
+async function withRoleType(person, opts) {
+  const roleTypeId = await contactRoleTypeOptionId(person?.job_title, fields.person.contactRoleType);
+  return { ...opts, roleTypeId };
+}
+
 export async function createPerson(person, orgId, opts = {}) {
   const res = await requestV2(
-    { method: 'POST', url: '/persons', data: buildPersonBody(person, orgId, opts) },
+    { method: 'POST', url: '/persons', data: buildPersonBody(person, orgId, await withRoleType(person, opts)) },
     { label: 'pd-createPerson' },
   );
   return res.data?.data;
@@ -125,7 +138,7 @@ export async function createPerson(person, orgId, opts = {}) {
 
 export async function updatePerson(personId, person, orgId, opts = {}) {
   const res = await requestV2(
-    { method: 'PATCH', url: `/persons/${personId}`, data: buildPersonBody(person, orgId, opts) },
+    { method: 'PATCH', url: `/persons/${personId}`, data: buildPersonBody(person, orgId, await withRoleType(person, opts)) },
     { label: 'pd-updatePerson' },
   );
   return res.data?.data;

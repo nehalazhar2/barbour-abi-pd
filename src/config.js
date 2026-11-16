@@ -216,6 +216,10 @@ export const config = {
         // field — writes 403 unless the account has Contact Sync enabled.
         // Leave blank to skip the job-title write entirely.
         barbourJobTitle: process.env.PD_FIELD_PERSON_BARBOUR_JOB_TITLE,
+        // Phase 2 / A3: single-option "Contact Role Type" field. Empty → never
+        // written (pre-Phase-2 behaviour). Value = option id for the group
+        // roleTypeForTitle picks from the Barbour job title.
+        contactRoleType: process.env.PD_FIELD_PERSON_CONTACT_ROLE_TYPE,
       },
     },
     // Person label applied to fallback contacts pulled from Barbour's
