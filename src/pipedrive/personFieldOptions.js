@@ -41,7 +41,7 @@ function warnOnce(key, msg) {
 export async function getPersonEnumOptions(fieldKey, { fetchFields = fetchAllPersonFields, now = Date.now } = {}) {
   if (!fieldKey) return null;
   const t = now();
-  if (failedAt != null && t - failedAt < FAIL_TTL_MS) return null;
+  if (failedAt != null && t - failedAt < FAIL_TTL_MS) return enumFields?.get(fieldKey) ?? null;
   if (!enumFields || t - loadedAt >= TTL_MS) {
     try {
       const map = new Map();
@@ -58,7 +58,8 @@ export async function getPersonEnumOptions(fieldKey, { fetchFields = fetchAllPer
     } catch (err) {
       failedAt = t;
       logger.warn(`[pd-person] could not load person field options (retry in 60s): ${err.message}`);
-      return null;
+      // A good earlier copy is still the best answer we have.
+      if (!enumFields) return null;
     }
   }
   const opts = enumFields.get(fieldKey);

@@ -2,6 +2,7 @@ import { requestV2 } from './client.js';
 import { wrapForV2, fields, searchByCustomField } from './customFields.js';
 import { logger } from '../utils/logger.js';
 import { contactRoleTypeOptionId } from './personFieldOptions.js';
+import { normaliseTitle } from '../sync/contactRoleType.js';
 
 // Name + org fallback lookup. Barbour often ships persons with only a name and
 // no email. Searching PD by name alone is too ambiguous (many people share names),
@@ -123,8 +124,12 @@ export function buildPersonBody(person, orgId, { labelIds, roleTypeId } = {}) {
 
 // Every person write goes through createPerson / updatePerson, so this is the
 // one place the Contact Role Type is worked out.
-async function withRoleType(person, opts) {
-  const roleTypeId = await contactRoleTypeOptionId(person?.job_title, fields.person.contactRoleType);
+// On an UPDATE with no Barbour title we leave the field alone: a sparser
+// duplicate Barbour record (CLAUDE.md, Andy Losty) must not overwrite a good
+// "Estimating" with "Other". New contacts with no title still get "Other".
+export async function withRoleType(person, opts, { isUpdate = false, optionId = contactRoleTypeOptionId } = {}) {
+  if (isUpdate && !normaliseTitle(person?.job_title)) return { ...opts, roleTypeId: undefined };
+  const roleTypeId = await optionId(person?.job_title, fields.person.contactRoleType);
   return { ...opts, roleTypeId };
 }
 
@@ -138,7 +143,7 @@ export async function createPerson(person, orgId, opts = {}) {
 
 export async function updatePerson(personId, person, orgId, opts = {}) {
   const res = await requestV2(
-    { method: 'PATCH', url: `/persons/${personId}`, data: buildPersonBody(person, orgId, await withRoleType(person, opts)) },
+    { method: 'PATCH', url: `/persons/${personId}`, data: buildPersonBody(person, orgId, await withRoleType(person, opts, { isUpdate: true })) },
     { label: 'pd-updatePerson' },
   );
   return res.data?.data;

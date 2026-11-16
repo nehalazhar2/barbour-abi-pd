@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getPersonEnumOptions, contactRoleTypeOptionId, __test__ } from '../src/pipedrive/personFieldOptions.js';
-import { buildPersonBody } from '../src/pipedrive/persons.js';
+import { buildPersonBody, withRoleType } from '../src/pipedrive/persons.js';
 import { fields } from '../src/pipedrive/customFields.js';
 import { CONTACT_ROLE_TYPE_LABELS } from '../src/sync/contactRoleType.js';
 
@@ -59,4 +59,28 @@ test('person body: role type written only when the field is configured and an id
   } finally {
     fields.person.contactRoleType = saved;
   }
+});
+
+test('withRoleType: update with blank title leaves the field alone; create gets Other', async () => {
+  const saved = fields.person.contactRoleType;
+  fields.person.contactRoleType = KEY;
+  try {
+    const optionId = async (title) => (title ? 2003 : 2009);
+    assert.equal((await withRoleType({ job_title: '  ' }, {}, { isUpdate: true, optionId })).roleTypeId, undefined);
+    assert.equal((await withRoleType({}, {}, { isUpdate: true, optionId })).roleTypeId, undefined);
+    assert.equal((await withRoleType({}, {}, { optionId })).roleTypeId, 2009, 'create with no title → Other');
+    assert.equal((await withRoleType({ job_title: 'Estimator' }, { labelIds: [1] }, { isUpdate: true, optionId })).roleTypeId, 2003);
+    assert.deepEqual((await withRoleType({ job_title: 'Estimator' }, { labelIds: [1] }, { isUpdate: true, optionId })).labelIds, [1], 'other opts kept');
+  } finally {
+    fields.person.contactRoleType = saved;
+  }
+});
+
+test('options: a failed refresh keeps the last good copy', async () => {
+  __test__.reset();
+  await getPersonEnumOptions(KEY, { fetchFields: async () => pdFields, now: () => 0 });
+  const failing = async () => { throw new Error('boom'); };
+  const after = await getPersonEnumOptions(KEY, { fetchFields: failing, now: () => 11 * 60 * 1000 });
+  assert.equal(after.get('engineer'), 2000);
+  assert.equal((await getPersonEnumOptions(KEY, { fetchFields: failing, now: () => 11 * 60 * 1000 + 5 })).get('engineer'), 2000, 'inside back-off');
 });
